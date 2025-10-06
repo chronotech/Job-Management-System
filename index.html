@@ -22,9 +22,22 @@
         .card-shadow {
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
         }
+        /* Style for the authentication modal overlay */
+        #auth-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            display: none; /* Initially hidden */
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
         /* Hide print button when printing */
         @media print {
-            #form-container, h2.mb-4, #loading-jobs, #empty-state, .edit-job-btn, .delete-job-btn, .print-job-btn {
+            #form-container, h2.mb-4, #loading-jobs, #empty-state, .edit-job-btn, .delete-job-btn, .print-job-btn, #auth-btn {
                 display: none !important;
             }
             .job-card {
@@ -39,11 +52,17 @@
 <body class="p-4 md:p-8">
 
     <div id="app" class="max-w-6xl mx-auto">
-        <header class="text-center mb-10">
+        <header class="text-center mb-10 relative">
             <h1 class="text-4xl font-extrabold text-blue-800 tracking-tight">Department Job Tracker</h1>
             <p class="text-gray-600 mt-1">Track items, dimensions, quantities, and departmental notes in real-time.</p>
-            <div id="auth-status" class="mt-2 text-sm text-gray-500">
-                Loading authentication...
+            
+            <div class="absolute top-0 right-0 mt-2 flex items-center space-x-3">
+                <div id="auth-status" class="text-xs text-gray-500 hidden md:block">
+                    Loading authentication...
+                </div>
+                <button id="auth-btn" class="p-2 text-xs md:text-sm font-semibold text-white bg-green-600 rounded-lg hover:bg-green-700 transition duration-150 shadow-md">
+                    User Authentication
+                </button>
             </div>
         </header>
 
@@ -103,10 +122,42 @@
 
     </div>
 
+    <!-- Authentication Modal (Hidden by default) -->
+    <div id="auth-modal" class="hidden">
+        <div class="bg-white p-8 rounded-xl shadow-2xl max-w-sm w-full mx-4">
+            <h3 id="auth-modal-title" class="text-2xl font-bold text-gray-800 mb-4 text-center">Sign In / Sign Up</h3>
+            
+            <form id="auth-form" onsubmit="return false;" class="space-y-4">
+                <div>
+                    <label for="auth-email" class="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
+                    <input type="email" id="auth-email" placeholder="you@company.com" required
+                           class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="auth-password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                    <input type="password" id="auth-password" placeholder="Min 6 characters" required
+                           class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
+                </div>
+
+                <div id="auth-message" class="text-sm text-center text-red-500 font-medium h-4"></div>
+
+                <div class="flex space-x-3">
+                    <button id="signin-btn" type="submit" class="flex-1 p-3 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition duration-150">
+                        Sign In
+                    </button>
+                    <button id="signup-btn" type="button" class="flex-1 p-3 text-sm font-semibold text-blue-700 bg-blue-100 rounded-lg hover:bg-blue-200 transition duration-150">
+                        Sign Up
+                    </button>
+                </div>
+                <button id="close-modal-btn" type="button" class="w-full mt-4 text-gray-500 hover:text-gray-700 transition duration-150 text-sm">Close</button>
+            </form>
+        </div>
+    </div>
+
     <!-- Firebase SDK Imports -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global Firebase and App Variables
@@ -118,6 +169,16 @@
 
         // UI Elements
         const authStatusEl = document.getElementById('auth-status');
+        const authBtn = document.getElementById('auth-btn');
+        const authModal = document.getElementById('auth-modal');
+        const authForm = document.getElementById('auth-form');
+        const authEmailInput = document.getElementById('auth-email');
+        const authPasswordInput = document.getElementById('auth-password');
+        const authMessageEl = document.getElementById('auth-message');
+        const signInBtn = document.getElementById('signin-btn');
+        const signUpBtn = document.getElementById('signup-btn');
+        const closeModalBtn = document.getElementById('close-modal-btn');
+        
         const jobNameInput = document.getElementById('job-name');
         const graphicsNotesInput = document.getElementById('graphics-notes');
         const productionNotesInput = document.getElementById('production-notes');
@@ -130,6 +191,96 @@
         const loadingJobsEl = document.getElementById('loading-jobs');
         const emptyStateEl = document.getElementById('empty-state');
         const formTitleEl = document.getElementById('form-title');
+
+        // --- Authentication Functions ---
+
+        /**
+         * Toggles the visibility of the authentication modal.
+         */
+        const toggleAuthModal = () => {
+            if (auth.currentUser && !auth.currentUser.isAnonymous) {
+                // If a recognized user is logged in, treat the button as Sign Out
+                handleSignOut();
+            } else {
+                // Otherwise, show the sign-in/sign-up modal
+                authModal.classList.toggle('hidden');
+                authModal.style.display = authModal.classList.contains('hidden') ? 'none' : 'flex';
+                authMessageEl.textContent = ''; // Clear previous messages
+            }
+        };
+
+        /**
+         * Clears the authentication form fields.
+         */
+        const clearAuthForm = () => {
+            authEmailInput.value = '';
+            authPasswordInput.value = '';
+        };
+
+        /**
+         * Handles user sign up with email and password.
+         */
+        const handleSignUp = async () => {
+            const email = authEmailInput.value;
+            const password = authPasswordInput.value;
+            authMessageEl.textContent = 'Creating account...';
+            signInBtn.disabled = true;
+            signUpBtn.disabled = true;
+
+            try {
+                await createUserWithEmailAndPassword(auth, email, password);
+                authMessageEl.textContent = 'Sign up successful! You are now logged in.';
+                clearAuthForm();
+                setTimeout(() => toggleAuthModal(), 1500); // Close modal after success
+            } catch (error) {
+                console.error("Sign up error:", error);
+                authMessageEl.textContent = `Sign Up Failed: ${error.message.substring(0, 50)}...`;
+            } finally {
+                signInBtn.disabled = false;
+                signUpBtn.disabled = false;
+            }
+        };
+
+        /**
+         * Handles user sign in with email and password.
+         */
+        const handleSignIn = async (event) => {
+            event.preventDefault(); // Prevent default form submission if triggered by form submit
+            const email = authEmailInput.value;
+            const password = authPasswordInput.value;
+            authMessageEl.textContent = 'Signing in...';
+            signInBtn.disabled = true;
+            signUpBtn.disabled = true;
+
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+                authMessageEl.textContent = 'Sign in successful!';
+                clearAuthForm();
+                setTimeout(() => toggleAuthModal(), 1500); // Close modal after success
+            } catch (error) {
+                console.error("Sign in error:", error);
+                authMessageEl.textContent = `Sign In Failed: ${error.message.substring(0, 50)}...`;
+            } finally {
+                signInBtn.disabled = false;
+                signUpBtn.disabled = false;
+            }
+        };
+
+        /**
+         * Handles user sign out.
+         */
+        const handleSignOut = async () => {
+            try {
+                await signOut(auth);
+                // Immediately sign in anonymously again to keep the app functional
+                await signInAnonymously(auth);
+                // The onAuthStateChanged listener will update the UI
+            } catch (error) {
+                console.error("Sign out error:", error);
+                // Using a non-modal message for error reporting
+                alert(`Sign Out Failed: ${error.message}`);
+            }
+        };
 
         // --- Utility Functions ---
 
@@ -393,11 +544,35 @@
                 onAuthStateChanged(auth, (user) => {
                     if (user) {
                         userId = user.uid;
-                        authStatusEl.innerHTML = `<span class="font-medium text-gray-700">User ID:</span> <span class="text-sm font-mono text-blue-600">${userId}</span>`;
+                        const userDisplay = user.isAnonymous ? 'Anonymous User' : (user.email || user.uid);
+                        
+                        authStatusEl.innerHTML = `<span class="font-medium text-gray-700">User:</span> <span class="text-sm font-mono text-blue-600">${userDisplay}</span>`;
+                        authStatusEl.classList.remove('hidden');
+                        
+                        // FIX: Safely determine the display name for the sign out button
+                        let emailPrefix = 'User';
+                        if (user.email) {
+                            emailPrefix = user.email.split('@')[0];
+                        }
+
+                        if (user.isAnonymous) {
+                            authBtn.textContent = 'Sign In / Sign Up';
+                            authBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
+                            authBtn.classList.add('bg-green-600', 'hover:bg-green-700');
+                        } else {
+                            // Use the safely determined emailPrefix
+                            authBtn.textContent = `Sign Out (${emailPrefix})`; 
+                            authBtn.classList.remove('bg-green-600', 'hover:bg-green-700');
+                            authBtn.classList.add('bg-red-600', 'hover:bg-red-700');
+                        }
+
                         loadJobs(); // Start loading data only after auth is ready
                     } else {
-                        // This should ideally not happen after the initial sign-in attempt
-                        authStatusEl.textContent = 'Signed out. Please refresh.';
+                        // Signed out
+                        authStatusEl.textContent = 'Signed out.';
+                        authBtn.textContent = 'Sign In / Sign Up';
+                        authBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
+                        authBtn.classList.add('bg-green-600', 'hover:bg-green-700');
                     }
                 });
 
@@ -418,16 +593,19 @@
 
             if (!jobName) {
                 // Using a custom modal style prompt instead of alert/confirm
-                alert('Please enter a Job Name / ID.');
+                // Using alert here since we cannot use a full modal component
+                alert('Please enter a Job Name / ID.'); 
                 return;
             }
 
             if (items.length === 0) {
+                 // Using alert here since we cannot use a full modal component
                 alert('Please add at least one item.');
                 return;
             }
 
             const jobId = currentEditingJobId || crypto.randomUUID();
+            // Data is public so all users can see/edit jobs
             const jobRef = doc(db, `artifacts/${__app_id}/public/data/jobs`, jobId);
 
             const jobData = {
@@ -435,7 +613,8 @@
                 graphicsNotes,
                 productionNotes,
                 items,
-                userId,
+                createdBy: auth.currentUser?.email || 'Anonymous', // Store the user identity
+                userId: userId,
                 updatedAt: serverTimestamp(),
             };
 
@@ -448,6 +627,7 @@
                 console.log('Job saved successfully:', jobId);
             } catch (error) {
                 console.error('Error saving job:', error);
+                 // Using alert here since we cannot use a full modal component
                 alert('Failed to save job. Check console for details.');
             } finally {
                 saveJobBtn.disabled = false;
@@ -494,6 +674,7 @@
 
             jobListContainer.innerHTML = jobs.map(job => {
                 const lastUpdate = job.updatedAt ? job.updatedAt.toDate().toLocaleString() : 'N/A';
+                const createdBy = job.createdBy || 'Unknown';
                 const itemSummary = job.items.map(i => `${i.quantity}x ${i.name}`).join(', ') || 'No items defined';
 
                 return `
@@ -501,6 +682,7 @@
                         <div class="flex flex-col md:flex-row justify-between items-start md:items-center">
                             <h3 class="text-xl font-bold text-gray-900 truncate pr-4">${job.jobName}</h3>
                             <div class="mt-2 md:mt-0 flex items-center space-x-2">
+                                <span class="text-xs text-gray-500 mr-2">Created by: ${createdBy}</span>
                                 <span class="text-xs text-gray-500">Last Update: ${lastUpdate}</span>
                                 <button data-job-id="${job.id}" class="print-job-btn p-2 text-sm font-semibold text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition duration-150">
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m0 0V9a1 1 0 011-1h6a1 1 0 011 1v8m-10 0h10"></path></svg>
@@ -530,7 +712,7 @@
                                 `).join('')}
                             </ul>
                             
-                            <!-- Departmental Notes Section (Now clearly separated below items) -->
+                            <!-- Departmental Notes Section -->
                             <h4 class="text-base font-semibold mt-6 mb-3 border-t pt-4">Departmental Notes:</h4>
 
                             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
@@ -602,6 +784,7 @@
                     console.log('Job deleted:', jobId);
                 } catch (error) {
                     console.error('Error deleting job:', error);
+                    // Using alert here since we cannot use a full modal component
                     alert('Failed to delete job. Check console for details.');
                 }
             }
@@ -628,6 +811,7 @@
                 if (document.querySelectorAll('.item-input-row').length > 1) {
                     row.remove();
                 } else {
+                    // Using alert here since we cannot use a full modal component
                     alert('A job must have at least one item.');
                 }
             }
@@ -703,6 +887,14 @@
         addItemBtn.addEventListener('click', addItemInput);
         saveJobBtn.addEventListener('click', saveJob);
         cancelEditBtn.addEventListener('click', resetForm);
+        authBtn.addEventListener('click', toggleAuthModal);
+        closeModalBtn.addEventListener('click', toggleAuthModal);
+        
+        // Auth form button listeners
+        signInBtn.addEventListener('click', handleSignIn);
+        signUpBtn.addEventListener('click', handleSignUp);
+        authForm.addEventListener('submit', handleSignIn);
+
 
         // --- Initialization ---
 
