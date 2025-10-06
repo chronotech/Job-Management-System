@@ -25,7 +25,7 @@
         .status-PRODUCTION_WIP { background-color: #fce7f3; color: #c026d3; border: 1px solid #f0abfc; }
         .status-PENDING { background-color: #fee2e2; color: #dc2626; border: 1px solid #fca5a5; }
         .status-COMPLETE { background-color: #e5e7eb; color: #4b5563; border: 1px solid #9ca3af; }
-        .job-card-wrapper.status-COMPLETE { opacity: 0.6; filter: grayscale(50%); }
+        .job-card-wrapper.status-COMPLETE { opacity: 0.8; filter: grayscale(20%); }
 
         /* Print Styles */
         @media print {
@@ -36,7 +36,7 @@
         }
 
         /* Modal Styles */
-        #modal-overlay {
+        .modal-overlay {
             position: fixed;
             top: 0;
             left: 0;
@@ -74,7 +74,6 @@
         <div id="form-container" class="bg-white p-6 md:p-8 rounded-xl card-shadow mb-10">
             <h2 id="form-title" class="text-2xl font-semibold text-gray-800 mb-4">Create New Job</h2>
 
-            <!-- Job details and Item List remain largely the same, but the overall structure is retained for editing -->
             <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
                 <!-- Column 1: Job Details & Meta (md:col-span-1) -->
                 <div class="md:col-span-1 space-y-4">
@@ -154,7 +153,6 @@
     <div id="auth-modal" class="hidden modal-overlay">
         <div class="bg-white p-8 rounded-xl shadow-2xl max-w-sm w-full mx-4">
             <h3 id="auth-modal-title" class="text-2xl font-bold text-gray-800 mb-4 text-center">Sign In / Sign Up</h3>
-            <!-- Auth form logic here... (Same as previous implementation) -->
             <form id="auth-form" onsubmit="return false;" class="space-y-4">
                 <div>
                     <label for="auth-email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
@@ -178,7 +176,7 @@
     <div id="pending-modal" class="hidden modal-overlay">
         <div class="bg-white p-8 rounded-xl shadow-2xl max-w-lg w-full mx-4">
             <h3 class="text-2xl font-bold text-gray-800 mb-4">Request Pending Status</h3>
-            <p class="text-gray-600 mb-4">Please provide a concise reason for placing the job on hold. The job will remain in **PENDING** until a department explicitly resumes work.</p>
+            <p class="text-gray-600 mb-4">Please provide a concise reason for placing the job on hold. The job will remain in <strong>PENDING</strong> until a department explicitly resumes work.</p>
             
             <form id="pending-form" onsubmit="return false;" class="space-y-4">
                 <div>
@@ -196,12 +194,31 @@
         </div>
     </div>
 
-    <!-- Firebase SDK Imports -->
+    <!-- Confirmation Modal (for Delete) -->
+    <div id="confirmation-modal" class="hidden modal-overlay">
+        <div class="bg-white p-8 rounded-xl shadow-2xl max-w-sm w-full mx-4 text-center">
+            <h3 class="text-xl font-bold text-gray-800 mb-4">Confirm Action</h3>
+            <p id="confirmation-message" class="text-gray-600 mb-6"></p>
+            <div class="flex justify-center space-x-4">
+                <button id="cancel-confirmation-btn" type="button" class="p-3 text-sm font-semibold text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition duration-150">Cancel</button>
+                <button id="confirm-action-btn" type="button" class="p-3 text-sm font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 transition duration-150">
+                    Confirm
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase SDK Imports and Logic -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
+        // Initialize Firebase variables
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
         // Global Firebase and App Variables
         let app;
         let db;
@@ -211,6 +228,7 @@
         let allJobs = []; // Store all fetched jobs globally
         let currentView = 'list'; // 'list' or 'dashboard'
         let pendingJobIdForModal = null; // Stores ID of job requesting pending status
+        let pendingAction = null; // Stores action for the confirmation modal
 
         // Workflow Status Definitions (CRITICAL)
         const STATUS = {
@@ -274,6 +292,11 @@
         const submitPendingBtn = document.getElementById('submit-pending-btn');
         const cancelPendingBtn = document.getElementById('cancel-pending-btn');
 
+        const confirmationModal = document.getElementById('confirmation-modal');
+        const confirmationMessage = document.getElementById('confirmation-message');
+        const confirmActionButton = document.getElementById('confirm-action-btn');
+        const cancelConfirmationButton = document.getElementById('cancel-confirmation-btn');
+
         // --- Utility Functions ---
 
         const displayNotification = (message, isError = true) => {
@@ -286,6 +309,7 @@
 
         const formatDate = (isoDate) => {
             if (!isoDate) return 'No Deadline';
+            // Use UTC methods to prevent timezone shifts from changing the date
             const date = new Date(isoDate);
             const year = date.getUTCFullYear();
             const month = String(date.getUTCMonth() + 1).padStart(2, '0');
@@ -295,15 +319,14 @@
 
         const getPriorityClasses = (priority) => {
             switch (priority) {
-                case 'High': return { bg: 'priority-high', color: '#ef4444' };
-                case 'Medium': return { bg: 'priority-medium', color: '#f59e0b' };
-                case 'Low': return { bg: 'priority-low', color: '#10b981' };
-                default: return { bg: 'bg-gray-100', color: '#9ca3af' };
+                case 'High': return { bg: 'bg-red-100 text-red-800 border-red-300', color: '#ef4444' };
+                case 'Medium': return { bg: 'bg-yellow-100 text-yellow-800 border-yellow-300', color: '#f59e0b' };
+                case 'Low': return { bg: 'bg-green-100 text-green-800 border-green-300', color: '#10b981' };
+                default: return { bg: 'bg-gray-100 text-gray-500 border-gray-300', color: '#9ca3af' };
             }
         };
 
         const formatItemForInput = (item) => {
-            // Simple parsing logic for individual dimension/note fields for editing
             return {
                 ...item,
                 dimL: item.dimL || '',
@@ -320,7 +343,139 @@
             modalEl.style.display = show ? 'flex' : 'none';
         };
 
-        // --- Authentication Logic (Kept concise) ---
+        const promptConfirmation = (message, action, jobId, jobName) => {
+            pendingAction = { action, jobId, jobName };
+            confirmationMessage.textContent = message;
+            confirmActionButton.textContent = action.charAt(0).toUpperCase() + action.slice(1);
+            toggleModal(confirmationModal, true);
+        };
+
+        // --- Item List Management ---
+
+        const itemTemplate = (item = {}) => {
+            const formattedItem = formatItemForInput(item);
+            return `
+                <div class="item-entry p-3 bg-gray-50 rounded-lg border border-gray-200 grid grid-cols-1 md:grid-cols-12 gap-2" data-id="${formattedItem.id || 'new'}">
+                    <div class="md:col-span-4">
+                        <label class="block text-xs font-medium text-gray-700">Item Name</label>
+                        <input type="text" value="${formattedItem.name || ''}" placeholder="Banner, Decal, Sign" class="w-full p-1 text-sm border border-gray-300 rounded-md item-name" required>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-xs font-medium text-gray-700">Qty</label>
+                        <input type="number" value="${formattedItem.quantity || 1}" min="1" class="w-full p-1 text-sm border border-gray-300 rounded-md item-quantity quantity-input" required>
+                    </div>
+                    <div class="md:col-span-5 flex space-x-1">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700">L</label>
+                            <input type="number" step="0.01" value="${formattedItem.dimL}" placeholder="L" class="p-1 text-sm border border-gray-300 rounded-md dim-input item-dim-l">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700">W</label>
+                            <input type="number" step="0.01" value="${formattedItem.dimW}" placeholder="W" class="p-1 text-sm border border-gray-300 rounded-md dim-input item-dim-w">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-700">H</label>
+                            <input type="number" step="0.01" value="${formattedItem.dimH}" placeholder="H" class="p-1 text-sm border border-gray-300 rounded-md dim-input item-dim-h">
+                        </div>
+                        <div class="w-1/4">
+                             <label class="block text-xs font-medium text-gray-700">Unit</label>
+                             <select class="w-full p-1 text-sm border border-gray-300 rounded-md item-unit">
+                                 <option value="in" ${formattedItem.unit === 'in' ? 'selected' : ''}>in</option>
+                                 <option value="ft" ${formattedItem.unit === 'ft' ? 'selected' : ''}>ft</option>
+                                 <option value="mm" ${formattedItem.unit === 'mm' ? 'selected' : ''}>mm</option>
+                             </select>
+                        </div>
+                    </div>
+                    <div class="md:col-span-1 flex items-center justify-end">
+                        <button type="button" class="remove-item-btn text-red-500 hover:text-red-700 p-2" title="Remove Item">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>
+                    <div class="md:col-span-6">
+                        <label class="block text-xs font-medium text-gray-700">Graphics Note</label>
+                        <textarea placeholder="Specific design instructions..." class="w-full p-2 text-sm border border-gray-300 rounded-md item-note-textarea item-graphics-note">${formattedItem.graphicsNote || ''}</textarea>
+                    </div>
+                    <div class="md:col-span-6">
+                        <label class="block text-xs font-medium text-gray-700">Production Note</label>
+                        <textarea placeholder="Specific production instructions..." class="w-full p-2 text-sm border border-gray-300 rounded-md item-note-textarea item-production-note">${formattedItem.productionNote || ''}</textarea>
+                    </div>
+                </div>
+            `;
+        };
+
+        const getItemsData = () => {
+            const itemEntries = itemListContainer.querySelectorAll('.item-entry');
+            const items = [];
+            itemEntries.forEach(entry => {
+                const name = entry.querySelector('.item-name').value.trim();
+                const quantity = parseInt(entry.querySelector('.item-quantity').value);
+                const dimL = parseFloat(entry.querySelector('.item-dim-l').value) || null;
+                const dimW = parseFloat(entry.querySelector('.item-dim-w').value) || null;
+                const dimH = parseFloat(entry.querySelector('.item-dim-h').value) || null;
+                const unit = entry.querySelector('.item-unit').value;
+                const graphicsNote = entry.querySelector('.item-graphics-note').value.trim();
+                const productionNote = entry.querySelector('.item-production-note').value.trim();
+
+                if (name && quantity > 0) {
+                    items.push({
+                        id: entry.dataset.id === 'new' ? crypto.randomUUID() : entry.dataset.id,
+                        name,
+                        quantity,
+                        dimL,
+                        dimW,
+                        dimH,
+                        unit,
+                        graphicsNote,
+                        productionNote
+                    });
+                }
+            });
+            return items;
+        };
+
+        const addItem = (item = {}) => {
+            itemListContainer.insertAdjacentHTML('beforeend', itemTemplate(item));
+        };
+
+        // --- Form Management ---
+
+        const resetForm = () => {
+            currentEditingJobId = null;
+            jobNameInput.value = '';
+            jobDeadlineInput.value = '';
+            jobPriorityInput.value = 'Medium';
+            itemListContainer.innerHTML = '';
+            addItem(); // Start with one blank item
+            
+            formTitleEl.textContent = 'Create New Job';
+            saveBtnText.textContent = 'Save Job';
+            cancelEditBtn.classList.add('hidden');
+        };
+
+        const editJob = (jobId) => {
+            const job = allJobs.find(j => j.id === jobId);
+            if (!job) {
+                displayNotification('Job not found for editing.');
+                return;
+            }
+
+            // Scroll to the form
+            document.getElementById('form-container').scrollIntoView({ behavior: 'smooth' });
+
+            currentEditingJobId = jobId;
+            formTitleEl.textContent = `Editing Job: ${job.jobName}`;
+            saveBtnText.textContent = 'Update Job';
+            cancelEditBtn.classList.remove('hidden');
+
+            jobNameInput.value = job.jobName;
+            jobDeadlineInput.value = job.deadline || '';
+            jobPriorityInput.value = job.priority;
+
+            itemListContainer.innerHTML = '';
+            job.items.forEach(item => addItem(item));
+        };
+
+        // --- Authentication Logic ---
 
         const toggleAuthModal = () => {
             const user = auth.currentUser;
@@ -368,7 +523,7 @@
         /**
          * Centralized function to handle all job status and completion updates.
          */
-        const updateJobStatus = async (jobId, action, payload = {}) => {
+        window.updateJobStatus = async (jobId, action, payload = {}) => {
             if (!db || !userId) {
                 displayNotification("Authentication required to update job status.");
                 return;
@@ -377,7 +532,7 @@
             const job = allJobs.find(j => j.id === jobId);
             if (!job) return;
 
-            const jobRef = doc(db, `artifacts/${__app_id}/public/data/jobs`, jobId);
+            const jobRef = doc(db, `artifacts/${appId}/public/data/jobs`, jobId);
             let updateData = { updatedAt: serverTimestamp() };
             let newStatus = job.status;
 
@@ -390,9 +545,13 @@
                         if (newGraphicsState) {
                             newStatus = job.productionComplete ? STATUS.COMPLETE : STATUS.READY_PROD;
                         } else {
+                            // If Graphics is undone, job goes back to WIP or NEW
                             newStatus = job.productionComplete ? STATUS.PRODUCTION_WIP : STATUS.GRAPHICS_WIP;
                         }
-                        updateData.productionComplete = newStatus === STATUS.PRODUCTION_WIP ? false : updateData.productionComplete; // Reset Production if Graphics is undone
+                        // If Graphics is undone, reset Production Complete if status isn't READY_PROD or COMPLETE
+                        if (!newGraphicsState && newStatus === STATUS.GRAPHICS_WIP) {
+                            updateData.productionComplete = false;
+                        }
                         break;
 
                     case 'toggleProductionComplete':
@@ -402,7 +561,8 @@
                         if (newProductionState) {
                             newStatus = job.graphicsComplete ? STATUS.COMPLETE : STATUS.READY_PROD;
                         } else {
-                            newStatus = job.graphicsComplete ? STATUS.READY_PROD : STATUS.GRAPHICS_WIP;
+                            // If Production is undone, job goes back to WIP or READY_PROD
+                            newStatus = job.graphicsComplete ? STATUS.READY_PROD : STATUS.PRODUCTION_WIP;
                         }
                         break;
                     
@@ -421,8 +581,7 @@
                             } else if (!job.productionComplete) {
                                 newStatus = STATUS.PRODUCTION_WIP;
                             } else {
-                                // Should not happen if completed, but handle resume after pending on a complete job
-                                newStatus = STATUS.COMPLETE; 
+                                newStatus = STATUS.COMPLETE; // Should resume to complete if both were done before pending
                             }
                             updateData.status = newStatus;
                             updateData.pendingReason = '';
@@ -435,15 +594,8 @@
                         return;
                 }
 
-                // Final status check and application
-                if (newStatus === STATUS.COMPLETE && job.graphicsComplete && job.productionComplete) {
-                    updateData.status = STATUS.COMPLETE;
-                } else if (newStatus === STATUS.COMPLETE) {
-                    // Only transition to COMPLETE if both flags are true
-                    updateData.status = job.status;
-                } else {
-                    updateData.status = newStatus;
-                }
+                // Final status application
+                updateData.status = newStatus;
                 
                 // Commit the update to Firestore
                 await setDoc(jobRef, updateData, { merge: true });
@@ -453,6 +605,12 @@
                 console.error('Error updating job status:', error);
                 displayNotification('Failed to update job status. Check console.');
             }
+        };
+
+        window.requestPendingStatus = (jobId) => {
+            pendingJobIdForModal = jobId;
+            pendingReasonInput.value = ''; // Clear previous reason
+            toggleModal(pendingModal, true);
         };
 
         // --- Job CRUD Logic ---
@@ -469,7 +627,7 @@
             }
 
             const jobId = currentEditingJobId || crypto.randomUUID();
-            const jobRef = doc(db, `artifacts/${__app_id}/public/data/jobs`, jobId);
+            const jobRef = doc(db, `artifacts/${appId}/public/data/jobs`, jobId);
 
             // Fetch existing data for merge if editing
             const existingJob = allJobs.find(j => j.id === jobId);
@@ -479,14 +637,20 @@
                 deadline: jobDeadline,
                 priority: jobPriority,
                 items,
-                status: existingJob ? existingJob.status : STATUS.NEW, // Preserve status on edit
+                // Preserve status and completion flags on edit if job exists
+                status: existingJob ? existingJob.status : STATUS.NEW, 
                 graphicsComplete: existingJob ? existingJob.graphicsComplete : false,
                 productionComplete: existingJob ? existingJob.productionComplete : false,
                 pendingReason: existingJob ? existingJob.pendingReason : '',
-                createdBy: auth.currentUser?.email || 'Anonymous',
+                createdBy: existingJob ? existingJob.createdBy : (auth.currentUser?.email || 'Anonymous'),
                 userId: userId,
                 updatedAt: serverTimestamp(),
             };
+            
+            // Only set createdAt on creation
+            if (!existingJob) {
+                jobData.createdAt = serverTimestamp();
+            }
 
             saveJobBtn.disabled = true;
             saveBtnText.textContent = currentEditingJobId ? 'Updating...' : 'Saving...';
@@ -504,25 +668,37 @@
             }
         };
 
-        const deleteJob = async (jobId) => {
+        window.deleteJob = (jobId) => {
             const job = allJobs.find(j => j.id === jobId);
             if (!job) return;
             
-            if (window.confirm(`Are you sure you want to permanently delete the job "${job.jobName}"?`)) {
+            // Use the custom confirmation modal instead of window.confirm
+            promptConfirmation(`Are you sure you want to permanently delete the job "${job.jobName}"? This action cannot be undone (soft delete applied).`, 'delete', jobId, job.jobName);
+        };
+
+        const executePendingAction = async () => {
+            if (!pendingAction) return;
+
+            const { action, jobId, jobName } = pendingAction;
+            toggleModal(confirmationModal, false);
+
+            if (action === 'delete') {
                 try {
-                    const jobRef = doc(db, `artifacts/${__app_id}/public/data/jobs`, jobId);
-                    await setDoc(jobRef, { deleted: true }, { merge: true }); // Soft delete
+                    const jobRef = doc(db, `artifacts/${appId}/public/data/jobs`, jobId);
+                    await setDoc(jobRef, { deleted: true, deletedAt: serverTimestamp() }, { merge: true }); // Soft delete
+                    displayNotification(`Job "${jobName}" soft-deleted successfully.`, false);
                 } catch (error) {
                     console.error('Error deleting job:', error);
                     displayNotification('Failed to delete job.');
                 }
             }
+            pendingAction = null;
         };
 
         const loadJobs = () => {
             if (!db) return;
 
-            const jobsCollectionRef = collection(db, `artifacts/${__app_id}/public/data/jobs`);
+            const jobsCollectionRef = collection(db, `artifacts/${appId}/public/data/jobs`);
             const q = query(jobsCollectionRef);
 
             onSnapshot(q, (snapshot) => {
@@ -533,6 +709,19 @@
                 
                 const activeJobs = allJobs.filter(j => !j.deleted);
 
+                // Sort by deadline, then by priority (High first)
+                activeJobs.sort((a, b) => {
+                    // Priority sort
+                    const priorityOrder = { High: 3, Medium: 2, Low: 1 };
+                    if (priorityOrder[b.priority] !== priorityOrder[a.priority]) {
+                        return priorityOrder[b.priority] - priorityOrder[a.priority];
+                    }
+                    // Deadline sort (Ascending)
+                    const dateA = a.deadline || '9999-12-31';
+                    const dateB = b.deadline || '9999-12-31';
+                    return dateA.localeCompare(dateB);
+                });
+
                 // Update both views
                 renderJobs(activeJobs);
                 renderDashboard(activeJobs);
@@ -541,8 +730,10 @@
                 
                 if (activeJobs.length === 0) {
                     emptyStateEl.classList.remove('hidden');
+                    document.getElementById('dashboard-empty').classList.remove('hidden');
                 } else {
                     emptyStateEl.classList.add('hidden');
+                    document.getElementById('dashboard-empty').classList.add('hidden');
                 }
             }, (error) => {
                 console.error("Error loading jobs:", error);
@@ -560,14 +751,14 @@
             const itemSummary = job.items.map(i => `${i.quantity}x ${i.name}`).join(', ') || 'No items defined';
             const today = new Date().toISOString().split('T')[0];
             const isOverdue = job.status !== STATUS.COMPLETE && job.deadline < today;
-            const { bg: priorityBg } = getPriorityClasses(job.priority);
+            const { bg: priorityBg, color: priorityColor } = getPriorityClasses(job.priority);
             const statusInfo = STATUS_MAPPING[job.status] || STATUS_MAPPING[STATUS.NEW];
             const isPending = job.status === STATUS.PENDING;
             const isComplete = job.status === STATUS.COMPLETE;
 
             // Determine if the job card should show Graphics or Production controls
-            const showGraphicsControls = job.status === STATUS.NEW || job.status === STATUS.GRAPHICS_WIP || job.status === STATUS.PENDING || job.status === STATUS.READY_PROD;
-            const showProductionControls = job.status === STATUS.READY_PROD || job.status === STATUS.PRODUCTION_WIP || job.status === STATUS.PENDING || isComplete;
+            const showGraphicsControls = !isComplete;
+            const showProductionControls = !isComplete;
 
             return `
                 <div class="job-card-wrapper bg-white p-4 rounded-xl ${statusInfo.color} card-shadow ${isComplete ? 'status-COMPLETE' : ''}" data-id="${job.id}" data-status="${job.status}">
@@ -582,7 +773,7 @@
                         <!-- Meta Summary -->
                         <div class="flex flex-wrap space-x-3 text-sm mt-1 mb-3 text-gray-600">
                             <span class="${isOverdue ? 'font-bold text-red-600' : ''}">Deadline: ${formatDate(job.deadline)}</span>
-                            <span class="inline-block text-xs font-medium px-2 py-0.5 rounded-full ${priorityBg} border border-opacity-75">${job.priority} Priority</span>
+                            <span class="inline-block text-xs font-medium px-2 py-0.5 rounded-full ${priorityBg}" style="color: ${priorityColor};">${job.priority} Priority</span>
                         </div>
                         
                         ${isPending ? 
@@ -592,399 +783,204 @@
                             : ''
                         }
 
-                        <!-- Action Controls -->
-                        <div class="mt-3 pt-3 border-t border-gray-100 flex flex-wrap gap-2 job-actions">
-                            
-                            <!-- Pending/Resume Button -->
-                            <button data-job-id="${job.id}" class="${isPending ? 'resume-job-btn bg-green-500 hover:bg-green-600' : 'pending-job-btn bg-red-500 hover:bg-red-600'} text-white p-2 text-xs font-semibold rounded-lg transition duration-150">
-                                ${isPending ? 'Resume Work' : 'Request Pending'}
-                            </button>
+                        <!-- Item Summary/Details -->
+                        ${!detailed ? 
+                            `<p class="text-sm text-gray-700 mt-2 truncate">
+                                <strong>Items:</strong> ${itemSummary}
+                            </p>`
+                            : ''
+                        }
 
-                            <!-- Graphics Completion Toggle -->
-                            <div class="flex items-center space-x-1 p-2 bg-green-50 rounded-lg border border-green-200 ${showGraphicsControls || isComplete ? '' : 'opacity-50'}">
-                                <input type="checkbox" data-job-id="${job.id}" class="toggle-graphics-btn w-4 h-4 text-green-600 bg-gray-100 border-gray-300 rounded focus:ring-green-500 cursor-pointer" ${job.graphicsComplete ? 'checked' : ''} ${isComplete ? 'disabled' : ''}>
-                                <label class="text-xs text-green-700 font-semibold select-none">Graphics Done</label>
-                            </div>
-
-                            <!-- Production Completion Toggle -->
-                            <div class="flex items-center space-x-1 p-2 bg-purple-50 rounded-lg border border-purple-200 ${showProductionControls || isComplete ? '' : 'opacity-50'}">
-                                <input type="checkbox" data-job-id="${job.id}" class="toggle-production-btn w-4 h-4 text-purple-600 bg-gray-100 border-gray-300 rounded focus:ring-purple-500 cursor-pointer" ${job.productionComplete ? 'checked' : ''} ${isComplete ? 'disabled' : ''}>
-                                <label class="text-xs text-purple-700 font-semibold select-none">Production Done</label>
-                            </div>
-
-                            <!-- Edit/Delete/Print Button Group -->
-                            <div class="flex space-x-2 ml-auto">
-                                <button data-job-id="${job.id}" class="print-job-btn p-2 text-xs font-semibold text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200" title="Print Report">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m0 0V9a1 1 0 011-1h6a1 1 0 011 1v8m-10 0h10"></path></svg>
-                                </button>
-                                <button data-job-id="${job.id}" class="edit-job-btn p-2 text-xs font-semibold text-blue-600 bg-blue-100 rounded-lg hover:bg-blue-200 transition duration-150" title="View / Edit Details">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
-                                </button>
-                                <button data-job-id="${job.id}" class="delete-job-btn p-2 text-xs font-semibold text-red-600 bg-red-100 rounded-lg hover:bg-red-200 transition duration-150" title="Delete Job">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3m-3 0h10"></path></svg>
-                                </button>
-                            </div>
-                        </div>
-
+                        <!-- Detailed Item List (Only in List View or if explicitly requested) -->
                         ${detailed ? `
-                            <div class="details-${job.id} hidden mt-4 border-t pt-4">
-                                <p class="text-sm text-gray-600 line-clamp-1 mb-2">Items: ${itemSummary}</p>
-                                <button class="text-xs text-blue-500 hover:text-blue-700 font-medium show-details-btn" data-job-id="${job.id}">View All Item Notes</button>
-                                <p class="text-xs text-right text-gray-500 mt-4">Last Update: ${lastUpdate}</p>
+                            <div class="mt-3 pt-3 border-t border-gray-200 space-y-2">
+                                <p class="text-sm font-semibold text-gray-800">Detailed Item List (${job.items.length} items):</p>
+                                ${job.items.map(item => `
+                                    <div class="text-xs bg-gray-50 p-2 rounded-lg border border-gray-200">
+                                        <p class="font-medium text-gray-900">${item.quantity}x ${item.name} (${item.dimL || '?'}x${item.dimW || '?'}x${item.dimH || '?'} ${item.unit})</p>
+                                        ${item.graphicsNote ? `<p class="mt-1 text-yellow-700">G-Note: ${item.graphicsNote}</p>` : ''}
+                                        ${item.productionNote ? `<p class="mt-1 text-purple-700">P-Note: ${item.productionNote}</p>` : ''}
+                                    </div>
+                                `).join('')}
                             </div>
                         ` : ''}
+
+                        <!-- Departmental Controls (Always visible in card, but conditionally enabled) -->
+                        <div class="mt-4 pt-4 border-t border-gray-200 space-y-3">
+                            <p class="text-sm text-gray-500">Last Update: ${lastUpdate}</p>
+
+                            <!-- Resume Button (Visible only if Pending) -->
+                            ${isPending ? `
+                                <button onclick="updateJobStatus('${job.id}', 'resumeWork')"
+                                    class="w-full p-2 text-sm font-semibold text-green-700 bg-green-100 rounded-lg hover:bg-green-200 transition duration-150 shadow-md">
+                                    &#9654; Resume Work
+                                </button>` 
+                                : ''
+                            }
+
+                            ${!isPending && showGraphicsControls ? `
+                                <!-- Graphics Check -->
+                                <button onclick="updateJobStatus('${job.id}', 'toggleGraphicsComplete')"
+                                    class="w-full p-2 text-sm font-semibold rounded-lg transition duration-150 flex items-center justify-center shadow-md
+                                    ${job.graphicsComplete ? 'bg-yellow-500 hover:bg-yellow-600 text-white' : 'bg-yellow-100 hover:bg-yellow-200 text-yellow-800 border border-yellow-300'}">
+                                    ${job.graphicsComplete ? '&#10003; Graphics Complete (Click to Undo)' : 'Mark Graphics Ready'}
+                                </button>
+                            ` : ''}
+
+                            ${!isPending && showProductionControls ? `
+                                <!-- Production Check -->
+                                <button onclick="updateJobStatus('${job.id}', 'toggleProductionComplete')"
+                                    class="w-full p-2 text-sm font-semibold rounded-lg transition duration-150 flex items-center justify-center shadow-md
+                                    ${job.productionComplete ? 'bg-purple-600 hover:bg-purple-700 text-white' : 'bg-purple-100 hover:bg-purple-200 text-purple-800 border border-purple-300'}">
+                                    ${job.productionComplete ? '&#10003; Production Complete (Click to Undo)' : 'Mark Production Done'}
+                                </button>
+                            ` : ''}
+
+                            <!-- Pending Button (Visible only if not Pending or Complete) -->
+                            ${!isPending && !isComplete ? `
+                                <button onclick="requestPendingStatus('${job.id}')"
+                                    class="w-full p-2 text-sm font-semibold text-red-700 bg-red-100 rounded-lg hover:bg-red-200 transition duration-150 shadow-md">
+                                    Set Job Pending
+                                </button>` 
+                                : ''
+                            }
+                        </div>
+
+                    </div>
+                    <!-- Job Actions -->
+                    <div class="job-actions flex justify-end space-x-2 mt-3">
+                        <button onclick="editJob('${job.id}')" class="edit-job-btn p-2 text-xs font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100 transition duration-150">Edit</button>
+                        <button onclick="window.print()" class="print-job-btn p-2 text-xs font-medium text-gray-600 bg-gray-50 rounded-lg hover:bg-gray-100 transition duration-150">Print</button>
+                        <button onclick="deleteJob('${job.id}')" class="delete-job-btn p-2 text-xs font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 transition duration-150">Delete</button>
                     </div>
                 </div>
             `;
         };
+        
+        // --- View Rendering ---
 
         const renderJobs = (jobs) => {
-            const priorityOrder = { 'High': 3, 'Medium': 2, 'Low': 1, 'Default': 0 };
-            
-            const sortedJobs = jobs.sort((a, b) => {
-                // 1. Incomplete before Complete
-                if (a.status === STATUS.COMPLETE && b.status !== STATUS.COMPLETE) return 1;
-                if (a.status !== STATUS.COMPLETE && b.status === STATUS.COMPLETE) return -1;
-                // 2. Pending before WIP
-                if (a.status === STATUS.PENDING && b.status !== STATUS.PENDING) return -1;
-                if (a.status !== STATUS.PENDING && b.status === STATUS.PENDING) return 1;
-                // 3. Deadline ascending
-                return a.deadline.localeCompare(b.deadline);
-            });
-
-            jobListContainer.innerHTML = sortedJobs.map(job => renderJobCard(job, true)).join('');
-            attachJobListeners(jobs);
+            jobListContainer.innerHTML = jobs.map(job => renderJobCard(job, true)).join('');
         };
 
         const renderDashboard = (jobs) => {
             dashboardColumns.innerHTML = DASHBOARD_COLUMNS.map(column => {
+                // Filter jobs for the current column
                 const columnJobs = jobs.filter(job => column.statuses.includes(job.status));
-                const jobCards = columnJobs.map(job => renderJobCard(job)).join('');
                 
+                // If Production column, exclude jobs that are Graphics WIP
+                if (column.id === 'Production') {
+                    // This is handled by statuses: [READY_PROD, PRODUCTION_WIP]
+                    // If a job is Graphics done but Production not started, it's READY_PROD.
+                }
+
                 return `
-                    <div class="dashboard-column p-3 bg-white rounded-xl ${column.style} card-shadow h-full min-h-64">
-                        <h3 class="text-lg font-bold text-gray-800 mb-3 border-b pb-2">${column.title} (${columnJobs.length})</h3>
-                        <div class="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
-                            ${jobCards}
+                    <div id="column-${column.id}" class="dashboard-column p-3 bg-gray-100 rounded-xl ${column.style}">
+                        <h3 class="text-lg font-bold text-gray-700 mb-3">${column.title} (${columnJobs.length})</h3>
+                        <div class="space-y-4 min-h-[100px]">
+                            ${columnJobs.map(job => renderJobCard(job, false)).join('')}
+                            ${columnJobs.length === 0 ? `<p class="text-sm text-gray-500 p-2 text-center">No jobs in this column.</p>` : ''}
                         </div>
                     </div>
                 `;
             }).join('');
-
-            const activeDashboardJobs = jobs.filter(job => job.status !== STATUS.COMPLETE);
-            document.getElementById('dashboard-empty').classList.toggle('hidden', activeDashboardJobs.length > 0);
-            attachJobListeners(jobs);
-        };
-        
-        // --- Event Listeners and Bindings ---
-
-        const attachItemListeners = () => {
-            document.querySelectorAll('.remove-item-btn').forEach(btn => btn.removeEventListener('click', handleRemoveItem));
-            document.querySelectorAll('.remove-item-btn').forEach(btn => btn.addEventListener('click', handleRemoveItem));
-        };
-        const handleRemoveItem = (event) => {
-            const row = event.target.closest('.item-input-row');
-            if (row && document.querySelectorAll('.item-input-row').length > 1) {
-                row.remove();
-            } else {
-                displayNotification('A job must have at least one item.');
-            }
         };
 
-        const attachJobListeners = (jobs) => {
-            // Standard CRUD
-            document.querySelectorAll('.edit-job-btn').forEach(btn => { btn.onclick = (e) => { e.stopPropagation(); editJob(jobs.find(j => j.id === e.currentTarget.dataset.jobId)); }; });
-            document.querySelectorAll('.delete-job-btn').forEach(btn => { btn.onclick = (e) => { e.stopPropagation(); deleteJob(e.currentTarget.dataset.jobId); }; });
-            document.querySelectorAll('.print-job-btn').forEach(btn => { btn.onclick = (e) => { e.stopPropagation(); printJobReport(jobs.find(j => j.id === e.currentTarget.dataset.jobId)); }; });
-            document.querySelectorAll('.show-details-btn').forEach(btn => { btn.onclick = (e) => { e.stopPropagation(); toggleDetails(e.currentTarget.dataset.jobId); }; });
+        const toggleView = () => {
+            currentView = currentView === 'list' ? 'dashboard' : 'list';
 
-            // Departmental Status Toggles
-            document.querySelectorAll('.toggle-graphics-btn').forEach(btn => { btn.onchange = (e) => updateJobStatus(e.target.dataset.jobId, 'toggleGraphicsComplete'); });
-            document.querySelectorAll('.toggle-production-btn').forEach(btn => { btn.onchange = (e) => updateJobStatus(e.target.dataset.jobId, 'toggleProductionComplete'); });
-
-            // Pending/Resume Buttons
-            document.querySelectorAll('.pending-job-btn').forEach(btn => { btn.onclick = (e) => { e.stopPropagation(); pendingJobIdForModal = e.currentTarget.dataset.jobId; toggleModal(pendingModal); }; });
-            document.querySelectorAll('.resume-job-btn').forEach(btn => { btn.onclick = (e) => { e.stopPropagation(); updateJobStatus(e.currentTarget.dataset.jobId, 'resumeWork'); }; });
-        };
-        
-        const toggleDetails = (jobId) => {
-            const details = document.querySelector(`.details-${jobId}`);
-            if (details) details.classList.toggle('hidden');
-        };
-
-        const handleToggleView = () => {
-            if (currentView === 'list') {
-                currentView = 'dashboard';
+            if (currentView === 'dashboard') {
                 jobListView.classList.add('hidden');
                 dashboardView.classList.remove('hidden');
-                appViewsToggleBtn.textContent = 'Switch to Detailed List';
+                appViewsToggleBtn.textContent = 'Switch to List View';
             } else {
-                currentView = 'list';
-                dashboardView.classList.add('hidden');
                 jobListView.classList.remove('hidden');
+                dashboardView.classList.add('hidden');
                 appViewsToggleBtn.textContent = 'Switch to Dashboard';
             }
         };
 
-        const handlePendingSubmission = () => {
-            const reason = pendingReasonInput.value.trim();
-            if (!reason) {
-                displayNotification("Please provide a reason for the hold.");
-                return;
-            }
-            if (pendingJobIdForModal) {
-                updateJobStatus(pendingJobIdForModal, 'requestPending', { reason });
-                pendingJobIdForModal = null;
-                pendingReasonInput.value = '';
-                toggleModal(pendingModal, false);
-            }
-        };
-        
-        // --- Initialization ---
+        // --- Event Listeners and Initialization ---
 
-        window.onload = () => {
-            setupFirebase();
-            // Auth Bindings
+        document.addEventListener('DOMContentLoaded', () => {
+            // Initial item for the form
+            addItem();
+
+            // Firebase Initialization
+            if (Object.keys(firebaseConfig).length > 0) {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                setLogLevel('Debug'); // Enable Firestore logging
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        authStatusEl.textContent = `User: ${user.email ? user.email.substring(0, 15) : 'Anonymous'} | ID: ${userId.substring(0, 8)}...`;
+                        authBtn.textContent = user.isAnonymous ? 'Sign In' : 'Sign Out';
+                        authBtn.classList.toggle('bg-red-600', !user.isAnonymous);
+                        authBtn.classList.toggle('bg-green-600', user.isAnonymous);
+                        loadJobs(); // Start listening for data once auth is ready
+                    } else {
+                        // Attempt silent sign-in with custom token or anonymously
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (error) {
+                            console.error("Initial auth failed:", error);
+                            // Fallback to anonymous if custom token fails
+                            await signInAnonymously(auth);
+                        }
+                    }
+                });
+            } else {
+                authStatusEl.textContent = 'Firebase Config Missing';
+                console.error("Firebase config is missing. Data persistence disabled.");
+            }
+
+            // Form and Button Listeners
+            addItemBtn.addEventListener('click', () => addItem());
+            saveJobBtn.addEventListener('click', saveJob);
+            cancelEditBtn.addEventListener('click', resetForm);
+            appViewsToggleBtn.addEventListener('click', toggleView);
+            
+            // Delegation for remove item buttons
+            itemListContainer.addEventListener('click', (e) => {
+                if (e.target.closest('.remove-item-btn')) {
+                    e.target.closest('.item-entry').remove();
+                }
+            });
+
+            // Auth Modal Listeners
             authBtn.addEventListener('click', toggleAuthModal);
             closeAuthModalBtn.addEventListener('click', () => toggleModal(authModal, false));
             signInBtn.addEventListener('click', () => handleAuthSubmit(false));
             signUpBtn.addEventListener('click', () => handleAuthSubmit(true));
-            authForm.addEventListener('submit', (e) => { e.preventDefault(); handleAuthSubmit(false); });
-
-            // App Bindings
-            addItemBtn.addEventListener('click', addItemInput);
-            saveJobBtn.addEventListener('click', saveJob);
-            cancelEditBtn.addEventListener('click', resetForm);
-            appViewsToggleBtn.addEventListener('click', handleToggleView);
             
-            // Pending Modal Bindings
-            submitPendingBtn.addEventListener('click', handlePendingSubmission);
+            // Pending Modal Listeners
             cancelPendingBtn.addEventListener('click', () => toggleModal(pendingModal, false));
-
-            renderItemInputs(); 
-        };
-
-        // Included helper functions from previous implementation (generateItemInput, getItemsData, editJob, resetForm, printJobReport) for completeness, simplified for brevity here:
-        
-        const generateItemInput = (itemData) => { /* ... HTML generation logic ... */
-            const itemId = itemData.id || crypto.randomUUID();
-            const { name, dimL, dimW, dimH, unit, quantity, graphicsNote, productionNote } = itemData;
-            return `
-                <div class="item-input-row space-y-3 bg-gray-50 p-4 rounded-xl border border-gray-200" data-id="${itemId}">
-                    <div class="flex flex-col sm:flex-row items-start sm:items-center space-y-2 sm:space-y-0 sm:space-x-3">
-                        <input type="text" class="flex-grow p-2 border border-gray-300 rounded-lg text-sm" placeholder="Item Name (e.g., Banner, Box)" value="${name}" data-field="name">
-                        <div class="flex items-center space-x-1 text-sm flex-shrink-0">
-                            <input type="number" class="dim-input p-2 border border-gray-300 rounded-lg text-sm" placeholder="L" value="${dimL}" data-field="dimL" min="0">
-                            <span>x</span>
-                            <input type="number" class="dim-input p-2 border border-gray-300 rounded-lg text-sm" placeholder="W" value="${dimW}" data-field="dimW" min="0">
-                            <span>x</span>
-                            <input type="number" class="dim-input p-2 border border-gray-300 rounded-lg text-sm" placeholder="H" value="${dimH}" data-field="dimH" min="0">
-                            <select class="p-2 border border-gray-300 rounded-lg text-sm appearance-none" data-field="unit">
-                                <option value="in" ${unit === 'in' ? 'selected' : ''}>in</option>
-                                <option value="cm" ${unit === 'cm' ? 'selected' : ''}>cm</option>
-                                <option value="ft" ${unit === 'ft' ? 'selected' : ''}>ft</option>
-                            </select>
-                        </div>
-                        <div class="flex items-center space-x-2 flex-shrink-0">
-                            <input type="number" class="quantity-input p-2 border border-gray-300 rounded-lg text-sm" placeholder="Qty" value="${quantity}" data-field="quantity" min="1">
-                            <button type="button" class="remove-item-btn flex-shrink-0 p-2 text-red-500 hover:text-red-700 transition duration-150 rounded-lg bg-white" data-id="${itemId}" title="Remove Item">
-                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3m-3 0h10"></path></svg>
-                            </button>
-                        </div>
-                    </div>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-gray-100">
-                        <div>
-                            <label class="block text-xs font-bold mb-0.5 text-green-700">Graphics Note</label>
-                            <textarea class="item-note-textarea w-full p-2 border-2 border-green-200 rounded-lg focus:ring-green-500 focus:border-green-500 bg-green-50/50 text-sm" placeholder="Notes on file format, color profile, etc." data-field="graphicsNote">${graphicsNote}</textarea>
-                        </div>
-                        <div>
-                            <label class="block text-xs font-bold mb-0.5 text-red-700">Production Note</label>
-                            <textarea class="item-note-textarea w-full p-2 border-2 border-red-200 rounded-lg focus:ring-red-500 focus:border-red-500 bg-red-50/50 text-sm" placeholder="Notes on machine setup, material, finishing, etc." data-field="productionNote">${productionNote}</textarea>
-                        </div>
-                    </div>
-                </div>
-            `;
-        };
-        const renderItemInputs = (items = []) => {
-            itemListContainer.innerHTML = items.map(formatItemForInput).map(generateItemInput).join('') || generateItemInput({});
-            attachItemListeners();
-        };
-        const addItemInput = () => { itemListContainer.insertAdjacentHTML('beforeend', generateItemInput({})); attachItemListeners(); };
-        const getItemsData = () => {
-            const itemRows = document.querySelectorAll('.item-input-row');
-            const items = [];
-            itemRows.forEach(row => {
-                const id = row.dataset.id;
-                const name = row.querySelector('[data-field="name"]').value.trim();
-                const dimL = parseFloat(row.querySelector('[data-field="dimL"]').value) || 0;
-                const dimW = parseFloat(row.querySelector('[data-field="dimW"]').value) || 0;
-                const dimH = parseFloat(row.querySelector('[data-field="dimH"]').value) || 0;
-                const unit = row.querySelector('[data-field="unit"]').value;
-                const quantity = parseInt(row.querySelector('[data-field="quantity"]').value) || 1;
-                const graphicsNote = row.querySelector('[data-field="graphicsNote"]').value.trim();
-                const productionNote = row.querySelector('[data-field="productionNote"]').value.trim();
-                if (name || dimL > 0 || dimW > 0 || dimH > 0 || quantity > 0) {
-                    items.push({ id, name: name || 'Unnamed Item', dimension: `${dimL} x ${dimW} x ${dimH} ${unit}`, dimL, dimW, dimH, unit, quantity: Math.max(1, quantity), graphicsNote, productionNote });
+            submitPendingBtn.addEventListener('click', () => {
+                const reason = pendingReasonInput.value.trim();
+                if (reason && pendingJobIdForModal) {
+                    updateJobStatus(pendingJobIdForModal, 'requestPending', { reason });
+                    toggleModal(pendingModal, false);
+                    pendingJobIdForModal = null;
+                } else {
+                    displayNotification('Please provide a reason for pending status.');
                 }
             });
-            return items;
-        };
-        const editJob = (job) => {
-            currentEditingJobId = job.id;
-            jobNameInput.value = job.jobName;
-            jobDeadlineInput.value = job.deadline || '';
-            jobPriorityInput.value = job.priority || 'Medium';
-            renderItemInputs(job.items || []);
-            formTitleEl.textContent = `Editing Job: ${job.jobName}`;
-            saveBtnText.textContent = 'Update Job';
-            cancelEditBtn.classList.remove('hidden');
-            document.getElementById('form-container').scrollIntoView({ behavior: 'smooth' });
-        };
-        const resetForm = () => {
-            currentEditingJobId = null;
-            jobNameInput.value = '';
-            jobDeadlineInput.value = '';
-            jobPriorityInput.value = 'Medium';
-            formTitleEl.textContent = 'Create New Job';
-            saveBtnText.textContent = 'Save Job';
-            cancelEditBtn.classList.add('hidden');
-            renderItemInputs();
-        };
-        const setupFirebase = async () => {
-            try {
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                if (typeof __initial_auth_token !== 'undefined') { await signInWithCustomToken(auth, __initial_auth_token); } else { await signInAnonymously(auth); }
-                onAuthStateChanged(auth, (user) => {
-                    if (user) {
-                        userId = user.uid;
-                        const userDisplay = user.isAnonymous ? 'Anonymous' : (user.email || 'User');
-                        authStatusEl.innerHTML = `<span class="font-medium text-gray-700">User:</span> <span class="text-sm font-mono text-blue-600">${userDisplay}</span>`;
-                        authStatusEl.classList.remove('hidden');
-                        authBtn.textContent = user.isAnonymous ? 'Sign In / Up' : `Sign Out (${userDisplay.split('@')[0]})`; 
-                        authBtn.classList.toggle('bg-red-600', !user.isAnonymous);
-                        authBtn.classList.toggle('hover:bg-red-700', !user.isAnonymous);
-                        authBtn.classList.toggle('bg-green-600', user.isAnonymous);
-                        authBtn.classList.toggle('hover:bg-green-700', user.isAnonymous);
-                        loadJobs(); 
-                    }
-                });
-            } catch (error) { console.error("Firebase setup failed:", error); }
-        };
 
-        const printJobReport = (job) => { /* ... Print logic ... */
-            const isOverdue = job.status !== STATUS.COMPLETE && job.deadline < new Date().toISOString().split('T')[0];
-            const statusInfo = STATUS_MAPPING[job.status] || STATUS_MAPPING[STATUS.NEW];
+            // Confirmation Modal Listeners
+            cancelConfirmationButton.addEventListener('click', () => toggleModal(confirmationModal, false));
+            confirmActionButton.addEventListener('click', executePendingAction);
 
-            const printContent = `
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Job Report: ${job.jobName}</title>
-                    <style>
-                        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
-                        body { font-family: 'Inter', sans-serif; margin: 0; padding: 20px; color: #333; }
-                        h1 { color: #1e40af; font-size: 28px; border-bottom: 3px solid #bfdbfe; padding-bottom: 10px; margin-bottom: 20px; }
-                        h2 { font-size: 18px; color: #1f2937; margin-top: 20px; border-bottom: 1px solid #e5e7eb; padding-bottom: 5px; }
-                        .section { margin-bottom: 20px; page-break-inside: avoid; }
-                        .job-meta { display: flex; justify-content: space-between; margin-bottom: 15px; font-size: 14px; }
-                        .meta-item { background: #f0f4f8; padding: 8px 12px; border-radius: 6px; flex: 1; margin-right: 10px; }
-                        .meta-item:last-child { margin-right: 0; }
-                        .priority-flag { background-color: ${getPriorityClasses(job.priority).bg}; color: ${getPriorityClasses(job.priority).color}; border: 1px solid ${getPriorityClasses(job.priority).color}; padding: 3px 8px; border-radius: 4px; font-weight: bold; }
-                        .status-flag { padding: 3px 8px; border-radius: 4px; font-weight: bold; ${STATUS_MAPPING[job.status].color.replace('status-', 'background-color: ')} }
-                        .deadline-overdue { color: #dc2626; font-weight: bold; }
-                        .item-list { list-style: none; padding: 0; }
-                        .item-list > li { background: #f9fafb; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #e5e7eb; page-break-inside: avoid; }
-                        .item-name { font-weight: bold; margin-bottom: 4px; color: #1e40af; font-size: 16px; }
-                        .item-details { font-size: 14px; color: #4b5563; margin-bottom: 10px;}
-                        .notes-container { display: flex; gap: 10px; margin-top: 10px; border-top: 1px dashed #ccc; padding-top: 10px; }
-                        .note-box { flex: 1; padding: 10px; border-radius: 6px; font-size: 13px; }
-                        .note-box h3 { font-size: 13px; margin-top: 0; margin-bottom: 5px; font-weight: 700; }
-                        .graphics-note { background-color: #ecfdf5; border: 1px solid #a7f3d0; }
-                        .production-note { background-color: #fef2f2; border: 1px solid #fecaca; }
-                        .note-content { white-space: pre-wrap; color: #374151; }
-                        .completion { margin-top: 10px; font-weight: bold; color: ${job.graphicsComplete && job.productionComplete ? '#10b981' : '#f59e0b'}; }
-                        .footer { text-align: center; margin-top: 40px; font-size: 12px; color: #6b7280; }
-                    </style>
-                </head>
-                <body>
-                    <h1>Job Report: ${job.jobName}</h1>
-
-                    <div class="job-meta">
-                        <div class="meta-item">
-                            <span style="font-weight: 600;">Deadline:</span> 
-                            <span class="${isOverdue ? 'deadline-overdue' : ''}">${formatDate(job.deadline)} ${isOverdue ? '(OVERDUE)' : ''}</span>
-                        </div>
-                        <div class="meta-item">
-                            <span style="font-weight: 600;">Priority:</span> 
-                            <span class="priority-flag">${job.priority}</span>
-                        </div>
-                        <div class="meta-item">
-                            <span style="font-weight: 600;">Current Status:</span> 
-                            <span class="status-flag">${statusInfo.title}</span>
-                        </div>
-                        <div class="meta-item">
-                            <span style="font-weight: 600;">Completion:</span> 
-                            <span class="completion">${job.graphicsComplete ? 'Graphics Done' : 'Graphics Pending'} | ${job.productionComplete ? 'Production Done' : 'Production Pending'}</span>
-                        </div>
-                    </div>
-
-                    <div class="section">
-                        <h2>Itemized Production List</h2>
-                        <ul class="item-list">
-                            ${job.items.map((item, index) => `
-                                <li>
-                                    <div class="item-name">Item ${index + 1}: ${item.name}</div>
-                                    <div class="item-details">
-                                        Quantity: <span style="font-weight: 600;">${item.quantity}</span> |
-                                        Dimensions: <span style="font-weight: 600;">${item.dimL} x ${item.dimW} x ${item.dimH} ${item.unit}</span>
-                                    </div>
-                                    <div class="notes-container">
-                                        <div class="note-box graphics-note">
-                                            <h3>Graphics Notes</h3>
-                                            <div class="note-content">${item.graphicsNote || 'N/A'}</div>
-                                        </div>
-                                        <div class="note-box production-note">
-                                            <h3>Production Notes</h3>
-                                            <div class="note-content">${item.productionNote || 'N/A'}</div>
-                                        </div>
-                                    </div>
-                                </li>
-                            `).join('')}
-                        </ul>
-                    </div>
-
-                    <div class="footer">
-                        Report generated on: ${new Date().toLocaleString()} | Job ID: ${job.id.substring(0, 8)} | Created By: ${job.createdBy || 'Unknown'}
-                    </div>
-                </body>
-                </html>
-            `;
-
-            let printFrame = document.createElement('iframe');
-            printFrame.style.visibility = 'hidden';
-            printFrame.style.position = 'absolute';
-            printFrame.style.left = '-1000px'; 
-            printFrame.src = 'about:blank'; 
-
-            document.body.appendChild(printFrame);
-
-            printFrame.onload = function() {
-                let doc = printFrame.contentWindow.document;
-                doc.open();
-                doc.write(printContent);
-                doc.close();
-
-                setTimeout(() => {
-                    printFrame.contentWindow.focus();
-                    printFrame.contentWindow.print();
-                    setTimeout(() => { document.body.removeChild(printFrame); }, 1000);
-                }, 300);
-            };
-        };
+            // Export window.editJob for use in inline HTML click handlers
+            window.editJob = editJob;
+            window.requestPendingStatus = requestPendingStatus; // Exported for use in card buttons
+        });
 
     </script>
 </body>
