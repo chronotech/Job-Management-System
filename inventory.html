@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Inventory Management</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="p-8 bg-gray-50">
+  <h1 class="text-3xl font-bold mb-6">Inventory Management</h1>
+  <div id="auth-section" class="mb-8"></div>
+  <div id="admin-section" style="display:none;">
+    <form id="add-material-form" class="flex gap-2 mb-4">
+      <input type="text" id="material-name" placeholder="Material Name" class="p-2 rounded border" required>
+      <input type="text" id="material-desc" placeholder="Description" class="p-2 rounded border" required>
+      <input type="number" id="material-qty" placeholder="Quantity" class="p-2 rounded border" required>
+      <select id="material-unit" class="p-2 rounded border">
+        <option value="in">in</option>
+        <option value="ft">ft</option>
+        <option value="pcs">pcs</option>
+        <option value="mm">mm</option>
+      </select>
+      <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded">Add Material</button>
+    </form>
+    <table class="min-w-full bg-white rounded shadow">
+      <thead>
+        <tr>
+          <th class="p-2 border">Name</th>
+          <th class="p-2 border">Description</th>
+          <th class="p-2 border">Available</th>
+          <th class="p-2 border">Unit</th>
+          <th class="p-2 border">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="inventory-list"></tbody>
+    </table>
+  </div>
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, serverTimestamp, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    const firebaseConfig = window.__firebase_config || {/* your config here */};
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const auth = getAuth(app);
+    const appId = "default-app-id";
+    const inventoryRef = collection(db, `artifacts/${appId}/public/data/inventory`);
+
+    // Role check
+    async function getUserRole(uid) {
+      const userDoc = await getDoc(doc(db, `artifacts/${appId}/public/data/users`, uid));
+      return userDoc.exists() ? userDoc.data().role : null;
+    }
+
+    function renderInventory(materials) {
+      const tbody = document.getElementById('inventory-list');
+      tbody.innerHTML = materials.map(m =>
+        `<tr>
+          <td class="p-2 border">${m.name}</td>
+          <td class="p-2 border">${m.description}</td>
+          <td class="p-2 border">${m.quantityAvailable}</td>
+          <td class="p-2 border">${m.unit}</td>
+          <td class="p-2 border">
+            <button onclick="deleteMaterial('${m.id}')" class="text-red-600">Delete</button>
+          </td>
+        </tr>`
+      ).join('');
+    }
+
+    onSnapshot(inventoryRef, (snapshot) => {
+      const materials = [];
+      snapshot.forEach(doc => materials.push({ id: doc.id, ...doc.data() }));
+      renderInventory(materials);
+    });
+
+    document.getElementById('add-material-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = document.getElementById('material-name').value;
+      const description = document.getElementById('material-desc').value;
+      const qty = parseInt(document.getElementById('material-qty').value);
+      const unit = document.getElementById('material-unit').value;
+      const id = crypto.randomUUID();
+      await setDoc(doc(db, `artifacts/${appId}/public/data/inventory`, id), {
+        id, name, description, quantityAvailable: qty, unit, lastUpdated: serverTimestamp()
+      });
+      e.target.reset();
+    });
+
+    window.deleteMaterial = async (id) => {
+      await deleteDoc(doc(db, `artifacts/${appId}/public/data/inventory`, id));
+    };
+
+    // Auth/UI controls
+    onAuthStateChanged(auth, async (user) => {
+      const authSection = document.getElementById('auth-section');
+      const adminSection = document.getElementById('admin-section');
+      if (user) {
+        const role = await getUserRole(user.uid);
+        authSection.innerHTML = `Logged in as ${user.email || 'Anonymous'} (${role || 'No Role'}) <button id="signout-btn" class="ml-2 px-2 py-1 bg-gray-200 rounded">Sign Out</button>`;
+        if (role === 'admin') { adminSection.style.display = ""; }
+        else { adminSection.style.display = "none"; }
+        document.getElementById('signout-btn').onclick = () => signOut(auth);
+      } else {
+        adminSection.style.display = "none";
+        authSection.innerHTML = `<input type="email" id="email" placeholder="Email" class="p-2 border rounded">
+          <input type="password" id="password" placeholder="Password" class="p-2 border rounded">
+          <button id="login-btn" class="bg-blue-600 text-white px-4 py-2 rounded">Sign In</button>`;
+        document.getElementById('login-btn').onclick = async () => {
+          const email = document.getElementById('email').value;
+          const password = document.getElementById('password').value;
+          await signInWithEmailAndPassword(auth, email, password);
+        };
+      }
+    });
+  </script>
+</body>
+</html>
