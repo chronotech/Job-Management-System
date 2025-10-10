@@ -1,1008 +1,329 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JMS | Departmental Job Workflow Manager</title>
-    <!-- Load Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Configure Inter Font and Custom Styles -->
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #f4f7f9;
+import React, { useState, useEffect, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+    getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+    getFirestore, collection, doc, onSnapshot, addDoc, 
+    query, getDoc, setDoc, serverTimestamp, setLogLevel 
+} from 'firebase/firestore';
+
+// --- Firebase Initialization Variables ---
+// These global variables are provided by the canvas environment.
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'stock-manager-app';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// The official list of roles authorized to add stock
+const AUTHORIZED_ROLES = ['manager', 'dataEntry'];
+
+// Helper function for exponential backoff (retry logic for API calls)
+const retryFetch = async (fn, retries = 3, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (error) {
+            if (i === retries - 1) throw error;
+            console.warn(`Attempt ${i + 1} failed. Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= 2; // Exponential increase
         }
-        .dim-input { width: 80px; }
-        .quantity-input { width: 60px; }
-        .card-shadow { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06); }
-        .item-note-textarea { resize: none; height: 70px; }
-
-        /* Status Colors */
-        .status-NEW { background-color: #e0f2fe; color: #0284c7; border: 1px solid #7dd3fc; }
-        .status-GRAPHICS_WIP { background-color: #fffbeb; color: #d97706; border: 1px solid #fcd34d; }
-        .status-READY_PROD { background-color: #dcfce7; color: #15803d; border: 1px solid #86efac; }
-        .status-PRODUCTION_WIP { background-color: #fce7f3; color: #c026d3; border: 1px solid #f0abfc; }
-        .status-PENDING { background-color: #fee2e2; color: #dc2626; border: 1px solid #fca5a5; }
-        .status-COMPLETE { background-color: #e5e7eb; color: #4b5563; border: 1px solid #9ca3af; }
-        .job-card-wrapper.status-COMPLETE { opacity: 0.8; filter: grayscale(20%); }
-
-        /* Print Styles */
-        @media print {
-            #form-container, #controls-header, #app-views-toggle, #loading-jobs, #empty-state, .edit-job-btn, .delete-job-btn, .print-job-btn, #auth-btn, .job-actions, #auth-status, header, footer { display: none !important; }
-            .job-card-wrapper { margin: 0; border: none; box-shadow: none; page-break-after: always; }
-            #job-list-view { display: block !important; }
-            #dashboard-view { display: none !important; }
-        }
-
-        /* Modal Styles */
-        .modal-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.6);
-            display: none;
-            justify-content: center;
-            align-items: center;
-            z-index: 1000;
-        }
-    </style>
-</head>
-<body class="p-4 md:p-8">
-
-    <div id="app" class="max-w-7xl mx-auto">
-        <header class="text-center mb-6 relative border-b pb-4">
-            <h1 class="text-4xl font-extrabold text-blue-800 tracking-tight">Production Job Workflow</h1>
-            <p class="text-gray-600 mt-1">Manage jobs through Graphics, Production, and Pending states.</p>
-            
-            <div id="controls-header" class="absolute top-0 right-0 mt-4 flex items-center space-x-3">
-                <!-- View Toggle -->
-                <button id="app-views-toggle" class="p-2 text-sm font-semibold text-white bg-purple-600 rounded-lg hover:bg-purple-700 transition duration-150 shadow-md">
-                    Switch to Dashboard
-                </button>
-                <!-- Auth Controls -->
-                <div id="auth-status" class="text-xs text-gray-500 hidden md:block">Loading auth...</div>
-                <button id="auth-btn" class="p-2 text-xs md:text-sm font-semibold text-white bg-green-600 rounded-lg hover:bg-green-700 transition duration-150 shadow-md">
-                    Auth
-                </button>
-            </div>
-        </header>
-
-        <!-- Job Creation/Editing Form -->
-        <div id="form-container" class="bg-white p-6 md:p-8 rounded-xl card-shadow mb-10">
-            <h2 id="form-title" class="text-2xl font-semibold text-gray-800 mb-4">Create New Job</h2>
-
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
-                <!-- Column 1: Job Details & Meta (md:col-span-1) -->
-                <div class="md:col-span-1 space-y-4">
-                    <div>
-                        <label for="job-name" class="block text-sm font-medium text-gray-700 mb-1">Job Name / ID</label>
-                        <input type="text" id="job-name" placeholder="e.g., Project Atlas 001"
-                            class="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
-                    </div>
-                    <div>
-                        <label for="job-deadline" class="block text-sm font-medium text-gray-700 mb-1">Deadline Date</label>
-                        <input type="date" id="job-deadline" 
-                            class="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
-                    </div>
-                    <div>
-                        <label for="job-priority" class="block text-sm font-medium text-gray-700 mb-1">Priority Flag</label>
-                        <select id="job-priority" class="w-full p-2 border border-gray-300 bg-white rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150 appearance-none">
-                            <option value="Medium">Medium</option>
-                            <option value="High">High</option>
-                            <option value="Low">Low</option>
-                        </select>
-                    </div>
-                </div>
-
-                <!-- Column 2: Item Details (md:col-span-3) -->
-                <div class="md:col-span-3 border-t md:border-t-0 md:border-l border-gray-200 md:pl-6 pt-4 md:pt-0">
-                    <label class="block text-lg font-semibold text-gray-800 mb-2">Item Details, Dimensions, Notes (Per Item)</label>
-                    <div id="item-list" class="space-y-4 max-h-96 overflow-y-auto pr-2">
-                        <!-- Item fields will be injected here -->
-                    </div>
-                    <button id="add-item-btn" class="mt-4 w-full flex items-center justify-center p-2 text-sm font-medium text-blue-700 bg-blue-100 rounded-lg hover:bg-blue-200 transition duration-150">
-                        <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
-                        Add Item
-                    </button>
-                </div>
-            </div>
-
-            <div class="mt-8 flex justify-end space-x-4">
-                <button id="cancel-edit-btn" class="hidden p-3 text-sm font-semibold text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition duration-150">Cancel Edit</button>
-                <button id="save-job-btn" class="p-3 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition duration-150">
-                    <span id="save-btn-text">Save Job</span>
-                </button>
-            </div>
-        </div>
-
-        <!-- ---------------------------------------------------- -->
-        <!-- VIEW CONTAINERS -->
-        <!-- ---------------------------------------------------- -->
-
-        <!-- 1. Job List View (Default View) -->
-        <div id="job-list-view" class="">
-            <h2 class="text-3xl font-bold text-gray-800 mb-4 border-b pb-2">All Jobs (Detailed List)</h2>
-            <div id="job-list-container" class="space-y-4">
-                <p id="loading-jobs" class="text-gray-500 text-center p-8">Loading jobs...</p>
-            </div>
-            <div id="empty-state" class="hidden bg-yellow-50 p-6 rounded-lg border border-yellow-200 mt-4 text-center">
-                <p class="text-yellow-800 font-medium">No active jobs found. Start by creating a new job above!</p>
-            </div>
-        </div>
-
-        <!-- 2. Dashboard View (Kanban Style) -->
-        <div id="dashboard-view" class="hidden">
-            <h2 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-2">Workflow Dashboard (Kanban)</h2>
-            <div id="dashboard-columns" class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-                <!-- Columns will be rendered dynamically -->
-            </div>
-            <div id="dashboard-empty" class="hidden bg-yellow-50 p-6 rounded-lg border border-yellow-200 mt-4 text-center">
-                <p class="text-yellow-800 font-medium">No jobs currently in the workflow states.</p>
-            </div>
-        </div>
-    </div>
-    
-    <!-- ---------------------------------------------------- -->
-    <!-- MODALS & OVERLAYS -->
-    <!-- ---------------------------------------------------- -->
-
-    <!-- Authentication Modal -->
-    <div id="auth-modal" class="hidden modal-overlay">
-        <div class="bg-white p-8 rounded-xl shadow-2xl max-w-sm w-full mx-4">
-            <h3 id="auth-modal-title" class="text-2xl font-bold text-gray-800 mb-4 text-center">Sign In / Sign Up</h3>
-            <form id="auth-form" onsubmit="return false;" class="space-y-4">
-                <div>
-                    <label for="auth-email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                    <input type="email" id="auth-email" placeholder="you@company.com" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
-                </div>
-                <div>
-                    <label for="auth-password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
-                    <input type="password" id="auth-password" placeholder="Min 6 characters" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
-                </div>
-                <div id="auth-message" class="text-sm text-center text-red-500 font-medium h-4"></div>
-                <div class="flex space-x-3">
-                    <button id="signin-btn" type="submit" class="flex-1 p-3 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition duration-150">Sign In</button>
-                    <button id="signup-btn" type="button" class="flex-1 p-3 text-sm font-semibold text-blue-700 bg-blue-100 rounded-lg hover:bg-blue-200 transition duration-150">Sign Up</button>
-                </div>
-                <button id="close-auth-modal-btn" type="button" class="w-full mt-4 text-gray-500 hover:text-gray-700 transition duration-150 text-sm">Close</button>
-            </form>
-        </div>
-    </div>
-
-    <!-- Pending Reason Modal -->
-    <div id="pending-modal" class="hidden modal-overlay">
-        <div class="bg-white p-8 rounded-xl shadow-2xl max-w-lg w-full mx-4">
-            <h3 class="text-2xl font-bold text-gray-800 mb-4">Request Pending Status</h3>
-            <p class="text-gray-600 mb-4">Please provide a concise reason for placing the job on hold. The job will remain in <strong>PENDING</strong> until a department explicitly resumes work.</p>
-            
-            <form id="pending-form" onsubmit="return false;" class="space-y-4">
-                <div>
-                    <label for="pending-reason-input" class="block text-sm font-medium text-gray-700 mb-1">Hold Reason</label>
-                    <textarea id="pending-reason-input" rows="3" placeholder="Waiting for client approval on design..." required
-                        class="w-full p-3 border border-gray-300 rounded-lg focus:ring-red-500 focus:border-red-500"></textarea>
-                </div>
-                <div class="flex justify-end space-x-3">
-                    <button id="cancel-pending-btn" type="button" class="p-3 text-sm font-semibold text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition duration-150">Cancel</button>
-                    <button id="submit-pending-btn" type="submit" class="p-3 text-sm font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 transition duration-150">
-                        Place Job in Pending
-                    </button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- Confirmation Modal (for Delete) -->
-    <div id="confirmation-modal" class="hidden modal-overlay">
-        <div class="bg-white p-8 rounded-xl shadow-2xl max-w-sm w-full mx-4 text-center">
-            <h3 class="text-xl font-bold text-gray-800 mb-4">Confirm Action</h3>
-            <p id="confirmation-message" class="text-gray-600 mb-6"></p>
-            <div class="flex justify-center space-x-4">
-                <button id="cancel-confirmation-btn" type="button" class="p-3 text-sm font-semibold text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition duration-150">Cancel</button>
-                <button id="confirm-action-btn" type="button" class="p-3 text-sm font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 transition duration-150">
-                    Confirm
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Firebase SDK Imports and Logic -->
-   // Import the functions you need from the SDKs you need
-import { initializeApp } from "firebase/app";
-import { getAnalytics } from "firebase/analytics";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
-
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
-const firebaseConfig = {
-  apiKey: "AIzaSyCoSPjQNhQHnNOrumwONflcUk5A81TvARw",
-  authDomain: "job-management-system-39f0c.firebaseapp.com",
-  projectId: "job-management-system-39f0c",
-  storageBucket: "job-management-system-39f0c.firebasestorage.app",
-  messagingSenderId: "1098750622884",
-  appId: "1:1098750622884:web:98d03c3dc68839122dfa31",
-  measurementId: "G-DNDSR7QQDZ"
+    }
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+// --- Main Application Component ---
+const App = () => {
+    // State for Firebase services and user data
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    
+    // State for app data
+    const [userRole, setUserRole] = useState('guest');
+    const [stockItems, setStockItems] = useState([]);
+    const [newItemName, setNewItemName] = useState('');
+    const [newQuantity, setNewQuantity] = useState(0);
+    const [message, setMessage] = useState('');
+    const [loading, setLoading] = useState(true);
 
-        // Initialize Firebase variables
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-        
-        // Global Firebase and App Variables
-        let app;
-        let db;
-        let auth;
-        let userId = 'anonymous';
-        let currentEditingJobId = null;
-        let allJobs = []; // Store all fetched jobs globally
-        let currentView = 'list'; // 'list' or 'dashboard'
-        let pendingJobIdForModal = null; // Stores ID of job requesting pending status
-        let pendingAction = null; // Stores action for the confirmation modal
+    // Determines if the current user has permission based on their loaded role
+    const hasPermission = AUTHORIZED_ROLES.includes(userRole);
 
-        // Workflow Status Definitions (CRITICAL)
-        const STATUS = {
-            NEW: 'NEW',
-            GRAPHICS_WIP: 'GRAPHICS_WIP',
-            READY_PROD: 'READY_PROD',
-            PRODUCTION_WIP: 'PRODUCTION_WIP',
-            PENDING: 'PENDING',
-            COMPLETE: 'COMPLETE'
-        };
+    // 1. Firebase Initialization and Authentication
+    useEffect(() => {
+        if (Object.keys(firebaseConfig).length === 0) {
+            console.error("Firebase config is missing. Cannot initialize app.");
+            setLoading(false);
+            return;
+        }
 
-        const STATUS_MAPPING = {
-            NEW: { title: 'New Job', color: 'status-NEW', column: 'New' },
-            GRAPHICS_WIP: { title: 'Graphics In Progress', color: 'status-GRAPHICS_WIP', column: 'Graphics' },
-            READY_PROD: { title: 'Ready for Production', color: 'status-READY_PROD', column: 'Production' },
-            PRODUCTION_WIP: { title: 'Production In Progress', color: 'status-PRODUCTION_WIP', column: 'Production' },
-            PENDING: { title: 'Pending (On Hold)', color: 'status-PENDING', column: 'Pending' },
-            COMPLETE: { title: 'Complete', color: 'status-COMPLETE', column: 'Complete' }
-        };
-
-        const DASHBOARD_COLUMNS = [
-            { id: 'New', title: 'New Jobs', statuses: [STATUS.NEW], style: 'border-l-4 border-blue-500' },
-            { id: 'Graphics', title: 'Graphics WIP', statuses: [STATUS.GRAPHICS_WIP], style: 'border-l-4 border-yellow-500' },
-            { id: 'Pending', title: 'Pending Jobs', statuses: [STATUS.PENDING], style: 'border-l-4 border-red-500' },
-            { id: 'Production', title: 'Production Workflow', statuses: [STATUS.READY_PROD, STATUS.PRODUCTION_WIP], style: 'border-l-4 border-purple-500' },
-            { id: 'Complete', title: 'Completed', statuses: [STATUS.COMPLETE], style: 'border-l-4 border-gray-400' }
-        ];
-
-        // UI Elements
-        const authStatusEl = document.getElementById('auth-status');
-        const authBtn = document.getElementById('auth-btn');
-        const authModal = document.getElementById('auth-modal');
-        const authForm = document.getElementById('auth-form');
-        const authEmailInput = document.getElementById('auth-email');
-        const authPasswordInput = document.getElementById('auth-password');
-        const authMessageEl = document.getElementById('auth-message');
-        const signInBtn = document.getElementById('signin-btn');
-        const signUpBtn = document.getElementById('signup-btn');
-        const closeAuthModalBtn = document.getElementById('close-auth-modal-btn');
-        const appViewsToggleBtn = document.getElementById('app-views-toggle');
-        
-        const jobNameInput = document.getElementById('job-name');
-        const jobDeadlineInput = document.getElementById('job-deadline');
-        const jobPriorityInput = document.getElementById('job-priority');
-        const itemListContainer = document.getElementById('item-list');
-        const addItemBtn = document.getElementById('add-item-btn');
-        const saveJobBtn = document.getElementById('save-job-btn');
-        const saveBtnText = document.getElementById('save-btn-text');
-        const cancelEditBtn = document.getElementById('cancel-edit-btn');
-        const jobListContainer = document.getElementById('job-list-container');
-        const loadingJobsEl = document.getElementById('loading-jobs');
-        const emptyStateEl = document.getElementById('empty-state');
-        const formTitleEl = document.getElementById('form-title');
-
-        const jobListView = document.getElementById('job-list-view');
-        const dashboardView = document.getElementById('dashboard-view');
-        const dashboardColumns = document.getElementById('dashboard-columns');
-
-        const pendingModal = document.getElementById('pending-modal');
-        const pendingReasonInput = document.getElementById('pending-reason-input');
-        const submitPendingBtn = document.getElementById('submit-pending-btn');
-        const cancelPendingBtn = document.getElementById('cancel-pending-btn');
-
-        const confirmationModal = document.getElementById('confirmation-modal');
-        const confirmationMessage = document.getElementById('confirmation-message');
-        const confirmActionButton = document.getElementById('confirm-action-btn');
-        const cancelConfirmationButton = document.getElementById('cancel-confirmation-btn');
-
-        // --- Utility Functions ---
-
-        const displayNotification = (message, isError = true) => {
-            const box = document.createElement('div');
-            box.className = `fixed top-4 right-4 ${isError ? 'bg-red-600' : 'bg-green-600'} text-white p-3 rounded-lg shadow-xl z-50`;
-            box.textContent = message;
-            document.body.appendChild(box);
-            setTimeout(() => box.remove(), 4000);
-        };
-
-        const formatDate = (isoDate) => {
-            if (!isoDate) return 'No Deadline';
-            // Use UTC methods to prevent timezone shifts from changing the date
-            const date = new Date(isoDate);
-            const year = date.getUTCFullYear();
-            const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-            const day = String(date.getUTCDate()).padStart(2, '0');
-            return `${month}/${day}/${year}`;
-        };
-
-        const getPriorityClasses = (priority) => {
-            switch (priority) {
-                case 'High': return { bg: 'bg-red-100 text-red-800 border-red-300', color: '#ef4444' };
-                case 'Medium': return { bg: 'bg-yellow-100 text-yellow-800 border-yellow-300', color: '#f59e0b' };
-                case 'Low': return { bg: 'bg-green-100 text-green-800 border-green-300', color: '#10b981' };
-                default: return { bg: 'bg-gray-100 text-gray-500 border-gray-300', color: '#9ca3af' };
-            }
-        };
-
-        const formatItemForInput = (item) => {
-            return {
-                ...item,
-                dimL: item.dimL || '',
-                dimW: item.dimW || '',
-                dimH: item.dimH || '',
-                unit: item.unit || 'in',
-                graphicsNote: item.graphicsNote || '',
-                productionNote: item.productionNote || ''
-            };
-        };
-
-        const toggleModal = (modalEl, show = true) => {
-            modalEl.classList.toggle('hidden', !show);
-            modalEl.style.display = show ? 'flex' : 'none';
-        };
-
-        const promptConfirmation = (message, action, jobId, jobName) => {
-            pendingAction = { action, jobId, jobName };
-            confirmationMessage.textContent = message;
-            confirmActionButton.textContent = action.charAt(0).toUpperCase() + action.slice(1);
-            toggleModal(confirmationModal, true);
-        };
-
-        // --- Item List Management ---
-
-        const itemTemplate = (item = {}) => {
-            const formattedItem = formatItemForInput(item);
-            return `
-                <div class="item-entry p-3 bg-gray-50 rounded-lg border border-gray-200 grid grid-cols-1 md:grid-cols-12 gap-2" data-id="${formattedItem.id || 'new'}">
-                    <div class="md:col-span-4">
-                        <label class="block text-xs font-medium text-gray-700">Item Name</label>
-                        <input type="text" value="${formattedItem.name || ''}" placeholder="Banner, Decal, Sign" class="w-full p-1 text-sm border border-gray-300 rounded-md item-name" required>
-                    </div>
-                    <div class="md:col-span-2">
-                        <label class="block text-xs font-medium text-gray-700">Qty</label>
-                        <input type="number" value="${formattedItem.quantity || 1}" min="1" class="w-full p-1 text-sm border border-gray-300 rounded-md item-quantity quantity-input" required>
-                    </div>
-                    <div class="md:col-span-5 flex space-x-1">
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700">L</label>
-                            <input type="number" step="0.01" value="${formattedItem.dimL}" placeholder="L" class="p-1 text-sm border border-gray-300 rounded-md dim-input item-dim-l">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700">W</label>
-                            <input type="number" step="0.01" value="${formattedItem.dimW}" placeholder="W" class="p-1 text-sm border border-gray-300 rounded-md dim-input item-dim-w">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700">H</label>
-                            <input type="number" step="0.01" value="${formattedItem.dimH}" placeholder="H" class="p-1 text-sm border border-gray-300 rounded-md dim-input item-dim-h">
-                        </div>
-                        <div class="w-1/4">
-                             <label class="block text-xs font-medium text-gray-700">Unit</label>
-                             <select class="w-full p-1 text-sm border border-gray-300 rounded-md item-unit">
-                                 <option value="in" ${formattedItem.unit === 'in' ? 'selected' : ''}>in</option>
-                                 <option value="ft" ${formattedItem.unit === 'ft' ? 'selected' : ''}>ft</option>
-                                 <option value="mm" ${formattedItem.unit === 'mm' ? 'selected' : ''}>mm</option>
-                             </select>
-                        </div>
-                    </div>
-                    <div class="md:col-span-1 flex items-center justify-end">
-                        <button type="button" class="remove-item-btn text-red-500 hover:text-red-700 p-2" title="Remove Item">
-                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                        </button>
-                    </div>
-                    <div class="md:col-span-6">
-                        <label class="block text-xs font-medium text-gray-700">Graphics Note</label>
-                        <textarea placeholder="Specific design instructions..." class="w-full p-2 text-sm border border-gray-300 rounded-md item-note-textarea item-graphics-note">${formattedItem.graphicsNote || ''}</textarea>
-                    </div>
-                    <div class="md:col-span-6">
-                        <label class="block text-xs font-medium text-gray-700">Production Note</label>
-                        <textarea placeholder="Specific production instructions..." class="w-full p-2 text-sm border border-gray-300 rounded-md item-note-textarea item-production-note">${formattedItem.productionNote || ''}</textarea>
-                    </div>
-                </div>
-            `;
-        };
-
-        const getItemsData = () => {
-            const itemEntries = itemListContainer.querySelectorAll('.item-entry');
-            const items = [];
-            itemEntries.forEach(entry => {
-                const name = entry.querySelector('.item-name').value.trim();
-                const quantity = parseInt(entry.querySelector('.item-quantity').value);
-                const dimL = parseFloat(entry.querySelector('.item-dim-l').value) || null;
-                const dimW = parseFloat(entry.querySelector('.item-dim-w').value) || null;
-                const dimH = parseFloat(entry.querySelector('.item-dim-h').value) || null;
-                const unit = entry.querySelector('.item-unit').value;
-                const graphicsNote = entry.querySelector('.item-graphics-note').value.trim();
-                const productionNote = entry.querySelector('.item-production-note').value.trim();
-
-                if (name && quantity > 0) {
-                    items.push({
-                        id: entry.dataset.id === 'new' ? crypto.randomUUID() : entry.dataset.id,
-                        name,
-                        quantity,
-                        dimL,
-                        dimW,
-                        dimH,
-                        unit,
-                        graphicsNote,
-                        productionNote
-                    });
-                }
-            });
-            return items;
-        };
-
-        const addItem = (item = {}) => {
-            itemListContainer.insertAdjacentHTML('beforeend', itemTemplate(item));
-        };
-
-        // --- Form Management ---
-
-        const resetForm = () => {
-            currentEditingJobId = null;
-            jobNameInput.value = '';
-            jobDeadlineInput.value = '';
-            jobPriorityInput.value = 'Medium';
-            itemListContainer.innerHTML = '';
-            addItem(); // Start with one blank item
+        try {
+            const firebaseApp = initializeApp(firebaseConfig);
+            const firestore = getFirestore(firebaseApp);
+            const firebaseAuth = getAuth(firebaseApp);
             
-            formTitleEl.textContent = 'Create New Job';
-            saveBtnText.textContent = 'Save Job';
-            cancelEditBtn.classList.add('hidden');
-        };
+            setDb(firestore);
+            setAuth(firebaseAuth);
+            setLogLevel('debug'); // Enable detailed Firestore logging
 
-        const editJob = (jobId) => {
-            const job = allJobs.find(j => j.id === jobId);
-            if (!job) {
-                displayNotification('Job not found for editing.');
-                return;
-            }
-
-            // Scroll to the form
-            document.getElementById('form-container').scrollIntoView({ behavior: 'smooth' });
-
-            currentEditingJobId = jobId;
-            formTitleEl.textContent = `Editing Job: ${job.jobName}`;
-            saveBtnText.textContent = 'Update Job';
-            cancelEditBtn.classList.remove('hidden');
-
-            jobNameInput.value = job.jobName;
-            jobDeadlineInput.value = job.deadline || '';
-            jobPriorityInput.value = job.priority;
-
-            itemListContainer.innerHTML = '';
-            job.items.forEach(item => addItem(item));
-        };
-
-        // --- Authentication Logic ---
-
-        const toggleAuthModal = () => {
-            const user = auth.currentUser;
-            if (user && !user.isAnonymous) {
-                handleSignOut();
-            } else {
-                toggleModal(authModal, authModal.classList.contains('hidden'));
-                authMessageEl.textContent = '';
-                authEmailInput.value = '';
-                authPasswordInput.value = '';
-            }
-        };
-
-        const handleSignOut = async () => {
-            try {
-                await signOut(auth);
-                await signInAnonymously(auth);
-                displayNotification('Signed out and resumed as Anonymous.', false);
-            } catch (error) {
-                displayNotification(`Sign Out Failed: ${error.message}`);
-            }
-        };
-
-        const handleAuthSubmit = async (isSignUp) => {
-            const email = authEmailInput.value;
-            const password = authPasswordInput.value;
-            authMessageEl.textContent = isSignUp ? 'Creating account...' : 'Signing in...';
-
-            try {
-                if (isSignUp) {
-                    await createUserWithEmailAndPassword(auth, email, password);
+            // Sign in logic
+            const signIn = async () => {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(firebaseAuth, initialAuthToken);
                 } else {
-                    await signInWithEmailAndPassword(auth, email, password);
+                    await signInAnonymously(firebaseAuth);
                 }
-                authMessageEl.textContent = 'Success!';
-                setTimeout(() => toggleModal(authModal, false), 1500);
-            } catch (error) {
-                console.error("Auth error:", error);
-                authMessageEl.textContent = `Auth Failed: ${error.message.substring(0, 50)}...`;
-            }
-        };
-
-        // --- Departmental Status Update Logic (CRITICAL) ---
-
-        /**
-         * Centralized function to handle all job status and completion updates.
-         */
-        window.updateJobStatus = async (jobId, action, payload = {}) => {
-            if (!db || !userId) {
-                displayNotification("Authentication required to update job status.");
-                return;
-            }
-
-            const job = allJobs.find(j => j.id === jobId);
-            if (!job) return;
-
-            const jobRef = doc(db, `artifacts/${appId}/public/data/jobs`, jobId);
-            let updateData = { updatedAt: serverTimestamp() };
-            let newStatus = job.status;
-
-            try {
-                switch (action) {
-                    case 'toggleGraphicsComplete':
-                        const newGraphicsState = !job.graphicsComplete;
-                        updateData.graphicsComplete = newGraphicsState;
-                        // State machine transition based on Graphics completion
-                        if (newGraphicsState) {
-                            newStatus = job.productionComplete ? STATUS.COMPLETE : STATUS.READY_PROD;
-                        } else {
-                            // If Graphics is undone, job goes back to WIP or NEW
-                            newStatus = job.productionComplete ? STATUS.PRODUCTION_WIP : STATUS.GRAPHICS_WIP;
-                        }
-                        // If Graphics is undone, reset Production Complete if status isn't READY_PROD or COMPLETE
-                        if (!newGraphicsState && newStatus === STATUS.GRAPHICS_WIP) {
-                            updateData.productionComplete = false;
-                        }
-                        break;
-
-                    case 'toggleProductionComplete':
-                        const newProductionState = !job.productionComplete;
-                        updateData.productionComplete = newProductionState;
-                        // State machine transition based on Production completion
-                        if (newProductionState) {
-                            newStatus = job.graphicsComplete ? STATUS.COMPLETE : STATUS.READY_PROD;
-                        } else {
-                            // If Production is undone, job goes back to WIP or READY_PROD
-                            newStatus = job.graphicsComplete ? STATUS.READY_PROD : STATUS.PRODUCTION_WIP;
-                        }
-                        break;
-                    
-                    case 'requestPending':
-                        updateData.status = STATUS.PENDING;
-                        updateData.pendingReason = payload.reason;
-                        updateData.pendingInitiator = auth.currentUser?.email || 'Anonymous';
-                        newStatus = STATUS.PENDING;
-                        break;
-
-                    case 'resumeWork':
-                        // Resume logic: Determine the correct WIP state based on completion flags
-                        if (job.status === STATUS.PENDING) {
-                            if (!job.graphicsComplete) {
-                                newStatus = STATUS.GRAPHICS_WIP;
-                            } else if (!job.productionComplete) {
-                                newStatus = STATUS.PRODUCTION_WIP;
-                            } else {
-                                newStatus = STATUS.COMPLETE; // Should resume to complete if both were done before pending
-                            }
-                            updateData.status = newStatus;
-                            updateData.pendingReason = '';
-                            updateData.pendingInitiator = '';
-                        }
-                        break;
-
-                    default:
-                        console.warn("Unknown job status action:", action);
-                        return;
-                }
-
-                // Final status application
-                updateData.status = newStatus;
-                
-                // Commit the update to Firestore
-                await setDoc(jobRef, updateData, { merge: true });
-                displayNotification(`Job ${job.jobName} updated to status: ${STATUS_MAPPING[updateData.status].title}`, false);
-
-            } catch (error) {
-                console.error('Error updating job status:', error);
-                displayNotification('Failed to update job status. Check console.');
-            }
-        };
-
-        window.requestPendingStatus = (jobId) => {
-            pendingJobIdForModal = jobId;
-            pendingReasonInput.value = ''; // Clear previous reason
-            toggleModal(pendingModal, true);
-        };
-
-        // --- Job CRUD Logic ---
-
-        const saveJob = async () => {
-            const jobName = jobNameInput.value.trim();
-            const jobDeadline = jobDeadlineInput.value;
-            const jobPriority = jobPriorityInput.value;
-            const items = getItemsData();
-
-            if (!jobName || !jobDeadline || items.length === 0 || items.every(item => !item.name && item.quantity <= 0)) {
-                displayNotification('Please fill out Job Name, Deadline, and at least one item.'); 
-                return;
-            }
-
-            const jobId = currentEditingJobId || crypto.randomUUID();
-            const jobRef = doc(db, `artifacts/${appId}/public/data/jobs`, jobId);
-
-            // Fetch existing data for merge if editing
-            const existingJob = allJobs.find(j => j.id === jobId);
-
-            const jobData = {
-                jobName,
-                deadline: jobDeadline,
-                priority: jobPriority,
-                items,
-                // Preserve status and completion flags on edit if job exists
-                status: existingJob ? existingJob.status : STATUS.NEW, 
-                graphicsComplete: existingJob ? existingJob.graphicsComplete : false,
-                productionComplete: existingJob ? existingJob.productionComplete : false,
-                pendingReason: existingJob ? existingJob.pendingReason : '',
-                createdBy: existingJob ? existingJob.createdBy : (auth.currentUser?.email || 'Anonymous'),
-                userId: userId,
-                updatedAt: serverTimestamp(),
             };
             
-            // Only set createdAt on creation
-            if (!existingJob) {
-                jobData.createdAt = serverTimestamp();
-            }
-
-            saveJobBtn.disabled = true;
-            saveBtnText.textContent = currentEditingJobId ? 'Updating...' : 'Saving...';
-
-            try {
-                await setDoc(jobRef, jobData);
-                resetForm();
-                displayNotification(`Job ${jobId.substring(0,8)}... saved successfully!`, false);
-            } catch (error) {
-                console.error('Error saving job:', error);
-                displayNotification('Failed to save job. Check console for details.');
-            } finally {
-                saveJobBtn.disabled = false;
-                saveBtnText.textContent = 'Save Job';
-            }
-        };
-
-        window.deleteJob = (jobId) => {
-            const job = allJobs.find(j => j.id === jobId);
-            if (!job) return;
-            
-            // Use the custom confirmation modal instead of window.confirm
-            promptConfirmation(`Are you sure you want to permanently delete the job "${job.jobName}"? This action cannot be undone (soft delete applied).`, 'delete', jobId, job.jobName);
-        };
-
-        const executePendingAction = async () => {
-            if (!pendingAction) return;
-
-            const { action, jobId, jobName } = pendingAction;
-            toggleModal(confirmationModal, false);
-
-            if (action === 'delete') {
-                try {
-                    const jobRef = doc(db, `artifacts/${appId}/public/data/jobs`, jobId);
-                    await setDoc(jobRef, { deleted: true, deletedAt: serverTimestamp() }, { merge: true }); // Soft delete
-                    displayNotification(`Job "${jobName}" soft-deleted successfully.`, false);
-                } catch (error) {
-                    console.error('Error deleting job:', error);
-                    displayNotification('Failed to delete job.');
-                }
-            }
-            pendingAction = null;
-        };
-
-        const loadJobs = () => {
-            if (!db) return;
-
-            const jobsCollectionRef = collection(db, `artifacts/${appId}/public/data/jobs`);
-            const q = query(jobsCollectionRef);
-
-            onSnapshot(q, (snapshot) => {
-                allJobs = [];
-                snapshot.forEach(doc => {
-                    allJobs.push({ id: doc.id, ...doc.data() });
-                });
-                
-                const activeJobs = allJobs.filter(j => !j.deleted);
-
-                // Sort by deadline, then by priority (High first)
-                activeJobs.sort((a, b) => {
-                    // Priority sort
-                    const priorityOrder = { High: 3, Medium: 2, Low: 1 };
-                    if (priorityOrder[b.priority] !== priorityOrder[a.priority]) {
-                        return priorityOrder[b.priority] - priorityOrder[a.priority];
-                    }
-                    // Deadline sort (Ascending)
-                    const dateA = a.deadline || '9999-12-31';
-                    const dateB = b.deadline || '9999-12-31';
-                    return dateA.localeCompare(dateB);
-                });
-
-                // Update both views
-                renderJobs(activeJobs);
-                renderDashboard(activeJobs);
-
-                loadingJobsEl.classList.add('hidden');
-                
-                if (activeJobs.length === 0) {
-                    emptyStateEl.classList.remove('hidden');
-                    document.getElementById('dashboard-empty').classList.remove('hidden');
+            // Wait for authentication state
+            const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
+                if (user) {
+                    setUserId(user.uid);
                 } else {
-                    emptyStateEl.classList.add('hidden');
-                    document.getElementById('dashboard-empty').classList.add('hidden');
+                    // This case should be rare if signIn logic works, but handles sign out.
+                    setUserId(null);
                 }
-            }, (error) => {
-                console.error("Error loading jobs:", error);
-                jobListContainer.innerHTML = `<p class="text-red-500 p-4">Error loading jobs: ${error.message}</p>`;
+                setIsAuthReady(true);
             });
-        };
 
-        // --- Rendering Functions ---
+            // Run sign in
+            signIn().catch(e => {
+                console.error("Authentication failed:", e);
+                setIsAuthReady(true);
+            });
 
-        /**
-         * Renders a single job card for both the list and dashboard views.
-         */
-        const renderJobCard = (job, detailed = false) => {
-            const lastUpdate = job.updatedAt ? job.updatedAt.toDate().toLocaleString() : 'N/A';
-            const itemSummary = job.items.map(i => `${i.quantity}x ${i.name}`).join(', ') || 'No items defined';
-            const today = new Date().toISOString().split('T')[0];
-            const isOverdue = job.status !== STATUS.COMPLETE && job.deadline < today;
-            const { bg: priorityBg, color: priorityColor } = getPriorityClasses(job.priority);
-            const statusInfo = STATUS_MAPPING[job.status] || STATUS_MAPPING[STATUS.NEW];
-            const isPending = job.status === STATUS.PENDING;
-            const isComplete = job.status === STATUS.COMPLETE;
+            return () => unsubscribe();
+        } catch (e) {
+            console.error("Firebase initialization failed:", e);
+            setLoading(false);
+        }
+    }, []);
 
-            // Determine if the job card should show Graphics or Production controls
-            const showGraphicsControls = !isComplete;
-            const showProductionControls = !isComplete;
+    // 2. Fetch User Role and Stock Data (using onSnapshot)
+    useEffect(() => {
+        if (!isAuthReady || !db || !userId) return;
 
-            return `
-                <div class="job-card-wrapper bg-white p-4 rounded-xl ${statusInfo.color} card-shadow ${isComplete ? 'status-COMPLETE' : ''}" data-id="${job.id}" data-status="${job.status}">
-                    <div class="p-2 border border-dashed ${isPending ? 'border-red-400 bg-red-50' : 'border-gray-200'} rounded-lg">
-                        <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-2">
-                            <h3 class="text-lg font-bold text-gray-900 truncate pr-4">${job.jobName}</h3>
-                            <span class="text-xs font-semibold px-2 py-0.5 rounded-full ${statusInfo.color} whitespace-nowrap">
-                                ${statusInfo.title}
-                            </span>
-                        </div>
-
-                        <!-- Meta Summary -->
-                        <div class="flex flex-wrap space-x-3 text-sm mt-1 mb-3 text-gray-600">
-                            <span class="${isOverdue ? 'font-bold text-red-600' : ''}">Deadline: ${formatDate(job.deadline)}</span>
-                            <span class="inline-block text-xs font-medium px-2 py-0.5 rounded-full ${priorityBg}" style="color: ${priorityColor};">${job.priority} Priority</span>
-                        </div>
-                        
-                        ${isPending ? 
-                            `<div class="p-2 bg-red-100 rounded-lg text-xs text-red-800 border border-red-300">
-                                <strong>Hold Reason:</strong> ${job.pendingReason} (By: ${job.pendingInitiator})
-                            </div>` 
-                            : ''
-                        }
-
-                        <!-- Item Summary/Details -->
-                        ${!detailed ? 
-                            `<p class="text-sm text-gray-700 mt-2 truncate">
-                                <strong>Items:</strong> ${itemSummary}
-                            </p>`
-                            : ''
-                        }
-
-                        <!-- Detailed Item List (Only in List View or if explicitly requested) -->
-                        ${detailed ? `
-                            <div class="mt-3 pt-3 border-t border-gray-200 space-y-2">
-                                <p class="text-sm font-semibold text-gray-800">Detailed Item List (${job.items.length} items):</p>
-                                ${job.items.map(item => `
-                                    <div class="text-xs bg-gray-50 p-2 rounded-lg border border-gray-200">
-                                        <p class="font-medium text-gray-900">${item.quantity}x ${item.name} (${item.dimL || '?'}x${item.dimW || '?'}x${item.dimH || '?'} ${item.unit})</p>
-                                        ${item.graphicsNote ? `<p class="mt-1 text-yellow-700">G-Note: ${item.graphicsNote}</p>` : ''}
-                                        ${item.productionNote ? `<p class="mt-1 text-purple-700">P-Note: ${item.productionNote}</p>` : ''}
-                                    </div>
-                                `).join('')}
-                            </div>
-                        ` : ''}
-
-                        <!-- Departmental Controls (Always visible in card, but conditionally enabled) -->
-                        <div class="mt-4 pt-4 border-t border-gray-200 space-y-3">
-                            <p class="text-sm text-gray-500">Last Update: ${lastUpdate}</p>
-
-                            <!-- Resume Button (Visible only if Pending) -->
-                            ${isPending ? `
-                                <button onclick="updateJobStatus('${job.id}', 'resumeWork')"
-                                    class="w-full p-2 text-sm font-semibold text-green-700 bg-green-100 rounded-lg hover:bg-green-200 transition duration-150 shadow-md">
-                                    &#9654; Resume Work
-                                </button>` 
-                                : ''
-                            }
-
-                            ${!isPending && showGraphicsControls ? `
-                                <!-- Graphics Check -->
-                                <button onclick="updateJobStatus('${job.id}', 'toggleGraphicsComplete')"
-                                    class="w-full p-2 text-sm font-semibold rounded-lg transition duration-150 flex items-center justify-center shadow-md
-                                    ${job.graphicsComplete ? 'bg-yellow-500 hover:bg-yellow-600 text-white' : 'bg-yellow-100 hover:bg-yellow-200 text-yellow-800 border border-yellow-300'}">
-                                    ${job.graphicsComplete ? '&#10003; Graphics Complete (Click to Undo)' : 'Mark Graphics Ready'}
-                                </button>
-                            ` : ''}
-
-                            ${!isPending && showProductionControls ? `
-                                <!-- Production Check -->
-                                <button onclick="updateJobStatus('${job.id}', 'toggleProductionComplete')"
-                                    class="w-full p-2 text-sm font-semibold rounded-lg transition duration-150 flex items-center justify-center shadow-md
-                                    ${job.productionComplete ? 'bg-purple-600 hover:bg-purple-700 text-white' : 'bg-purple-100 hover:bg-purple-200 text-purple-800 border border-purple-300'}">
-                                    ${job.productionComplete ? '&#10003; Production Complete (Click to Undo)' : 'Mark Production Done'}
-                                </button>
-                            ` : ''}
-
-                            <!-- Pending Button (Visible only if not Pending or Complete) -->
-                            ${!isPending && !isComplete ? `
-                                <button onclick="requestPendingStatus('${job.id}')"
-                                    class="w-full p-2 text-sm font-semibold text-red-700 bg-red-100 rounded-lg hover:bg-red-200 transition duration-150 shadow-md">
-                                    Set Job Pending
-                                </button>` 
-                                : ''
-                            }
-                        </div>
-
-                    </div>
-                    <!-- Job Actions -->
-                    <div class="job-actions flex justify-end space-x-2 mt-3">
-                        <button onclick="editJob('${job.id}')" class="edit-job-btn p-2 text-xs font-medium text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100 transition duration-150">Edit</button>
-                        <button onclick="window.print()" class="print-job-btn p-2 text-xs font-medium text-gray-600 bg-gray-50 rounded-lg hover:bg-gray-100 transition duration-150">Print</button>
-                        <button onclick="deleteJob('${job.id}')" class="delete-job-btn p-2 text-xs font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 transition duration-150">Delete</button>
-                    </div>
-                </div>
-            `;
-        };
+        // A. Fetch User Role
+        const userRolePath = `/artifacts/${appId}/public/data/user_roles/${userId}`;
+        const userRoleRef = doc(db, userRolePath);
         
-        // --- View Rendering ---
-
-        const renderJobs = (jobs) => {
-            jobListContainer.innerHTML = jobs.map(job => renderJobCard(job, true)).join('');
-        };
-
-        const renderDashboard = (jobs) => {
-            dashboardColumns.innerHTML = DASHBOARD_COLUMNS.map(column => {
-                // Filter jobs for the current column
-                const columnJobs = jobs.filter(job => column.statuses.includes(job.status));
-                
-                // If Production column, exclude jobs that are Graphics WIP
-                if (column.id === 'Production') {
-                    // This is handled by statuses: [READY_PROD, PRODUCTION_WIP]
-                    // If a job is Graphics done but Production not started, it's READY_PROD.
-                }
-
-                return `
-                    <div id="column-${column.id}" class="dashboard-column p-3 bg-gray-100 rounded-xl ${column.style}">
-                        <h3 class="text-lg font-bold text-gray-700 mb-3">${column.title} (${columnJobs.length})</h3>
-                        <div class="space-y-4 min-h-[100px]">
-                            ${columnJobs.map(job => renderJobCard(job, false)).join('')}
-                            ${columnJobs.length === 0 ? `<p class="text-sm text-gray-500 p-2 text-center">No jobs in this column.</p>` : ''}
-                        </div>
-                    </div>
-                `;
-            }).join('');
-        };
-
-        const toggleView = () => {
-            currentView = currentView === 'list' ? 'dashboard' : 'list';
-
-            if (currentView === 'dashboard') {
-                jobListView.classList.add('hidden');
-                dashboardView.classList.remove('hidden');
-                appViewsToggleBtn.textContent = 'Switch to List View';
-            } else {
-                jobListView.classList.remove('hidden');
-                dashboardView.classList.add('hidden');
-                appViewsToggleBtn.textContent = 'Switch to Dashboard';
+        const unsubscribeRole = onSnapshot(userRoleRef, (docSnap) => {
+            if (docSnap.exists()) {
+                const role = docSnap.data().role;
+                setUserRole(role);
+                setMessage(`Role loaded: ${role}.`);
+                // For demo purposes: Ensure a default role exists for the current user
+            } else if (userId) {
+                // If no role is found, assign a default 'customer' role for the front-end display.
+                // In a real app, role assignment should happen on user creation.
+                setUserRole('customer');
+                setMessage('No specific role found. Defaulting to customer (no stock adding permission).');
             }
-        };
-
-        // --- Event Listeners and Initialization ---
-
-        document.addEventListener('DOMContentLoaded', () => {
-            // Initial item for the form
-            addItem();
-
-            // Firebase Initialization
-            if (Object.keys(firebaseConfig).length > 0) {
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                setLogLevel('Debug'); // Enable Firestore logging
-
-                onAuthStateChanged(auth, async (user) => {
-                    if (user) {
-                        userId = user.uid;
-                        authStatusEl.textContent = `User: ${user.email ? user.email.substring(0, 15) : 'Anonymous'} | ID: ${userId.substring(0, 8)}...`;
-                        authBtn.textContent = user.isAnonymous ? 'Sign In' : 'Sign Out';
-                        authBtn.classList.toggle('bg-red-600', !user.isAnonymous);
-                        authBtn.classList.toggle('bg-green-600', user.isAnonymous);
-                        loadJobs(); // Start listening for data once auth is ready
-                    } else {
-                        // Attempt silent sign-in with custom token or anonymously
-                        try {
-                            if (initialAuthToken) {
-                                await signInWithCustomToken(auth, initialAuthToken);
-                            } else {
-                                await signInAnonymously(auth);
-                            }
-                        } catch (error) {
-                            console.error("Initial auth failed:", error);
-                            // Fallback to anonymous if custom token fails
-                            await signInAnonymously(auth);
-                        }
-                    }
-                });
-            } else {
-                authStatusEl.textContent = 'Firebase Config Missing';
-                console.error("Firebase config is missing. Data persistence disabled.");
-            }
-
-            // Form and Button Listeners
-            addItemBtn.addEventListener('click', () => addItem());
-            saveJobBtn.addEventListener('click', saveJob);
-            cancelEditBtn.addEventListener('click', resetForm);
-            appViewsToggleBtn.addEventListener('click', toggleView);
-            
-            // Delegation for remove item buttons
-            itemListContainer.addEventListener('click', (e) => {
-                if (e.target.closest('.remove-item-btn')) {
-                    e.target.closest('.item-entry').remove();
-                }
-            });
-
-            // Auth Modal Listeners
-            authBtn.addEventListener('click', toggleAuthModal);
-            closeAuthModalBtn.addEventListener('click', () => toggleModal(authModal, false));
-            signInBtn.addEventListener('click', () => handleAuthSubmit(false));
-            signUpBtn.addEventListener('click', () => handleAuthSubmit(true));
-            
-            // Pending Modal Listeners
-            cancelPendingBtn.addEventListener('click', () => toggleModal(pendingModal, false));
-            submitPendingBtn.addEventListener('click', () => {
-                const reason = pendingReasonInput.value.trim();
-                if (reason && pendingJobIdForModal) {
-                    updateJobStatus(pendingJobIdForModal, 'requestPending', { reason });
-                    toggleModal(pendingModal, false);
-                    pendingJobIdForModal = null;
-                } else {
-                    displayNotification('Please provide a reason for pending status.');
-                }
-            });
-
-            // Confirmation Modal Listeners
-            cancelConfirmationButton.addEventListener('click', () => toggleModal(confirmationModal, false));
-            confirmActionButton.addEventListener('click', executePendingAction);
-
-            // Export window.editJob for use in inline HTML click handlers
-            window.editJob = editJob;
-            window.requestPendingStatus = requestPendingStatus; // Exported for use in card buttons
+        }, (error) => {
+            console.error("Error fetching user role:", error);
+            setMessage('Error fetching user role. Defaulting to customer.');
+            setUserRole('customer');
         });
 
-    </script>
-</body>
-</html>
+        // B. Fetch Stock Items
+        const stockCollectionPath = `/artifacts/${appId}/public/data/inventory_stock`;
+        const stockRef = collection(db, stockCollectionPath);
+        const unsubscribeStock = onSnapshot(stockRef, (snapshot) => {
+            const items = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            // Sort by creation time (or name)
+            items.sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+            setStockItems(items);
+            setLoading(false);
+        }, (error) => {
+            console.error("Error fetching stock data:", error);
+            setMessage('Error loading stock inventory.');
+            setLoading(false);
+        });
+
+        return () => {
+            unsubscribeRole();
+            unsubscribeStock();
+        };
+
+    }, [isAuthReady, db, userId]);
+
+    // 3. Stock Addition Handler
+    const handleAddStock = useCallback(async (e) => {
+        e.preventDefault();
+        
+        if (!hasPermission) {
+            setMessage('🚫 Permission Denied: Only managers and data entry personnel can add stock.');
+            return;
+        }
+
+        if (newItemName.trim() === '' || parseInt(newQuantity) <= 0) {
+            setMessage('Please enter a valid item name and quantity.');
+            return;
+        }
+
+        setLoading(true);
+        setMessage('Adding stock...');
+        
+        const stockCollectionPath = `/artifacts/${appId}/public/data/inventory_stock`;
+        const stockRef = collection(db, stockCollectionPath);
+        
+        try {
+            await retryFetch(() => addDoc(stockRef, {
+                name: newItemName.trim(),
+                quantity: parseInt(newQuantity),
+                addedBy: userId,
+                role: userRole,
+                createdAt: serverTimestamp(),
+            }));
+
+            setMessage(`✅ Successfully added ${newQuantity} x ${newItemName}.`);
+            setNewItemName('');
+            setNewQuantity(0);
+
+        } catch (error) {
+            console.error("Firestore write failed:", error);
+            // This error is crucial: it should catch a security rule denial (Permission Denied)
+            if (error.code === 'permission-denied') {
+                setMessage('❌ Security Violation Detected: The database rule blocked this operation.');
+            } else {
+                setMessage(`❌ Failed to add stock: ${error.message}`);
+            }
+        } finally {
+            setLoading(false);
+        }
+    }, [db, userId, userRole, newItemName, newQuantity, hasPermission]);
+
+
+    // --- UI Rendering ---
+
+    if (loading && !isAuthReady) {
+        return <div className="flex justify-center items-center h-screen bg-gray-50">
+            <div className="text-xl font-semibold text-gray-600">Loading App...</div>
+        </div>
+    }
+
+    return (
+        <div className="min-h-screen bg-gray-50 p-4 sm:p-8 font-inter">
+            <script src="https://cdn.tailwindcss.com"></script>
+            <div className="max-w-4xl mx-auto">
+                
+                <h1 className="text-3xl font-extrabold text-indigo-700 mb-2">
+                    Role-Based Stock Manager
+                </h1>
+                
+                <div className="text-sm font-medium text-gray-500 mb-6 p-3 bg-white shadow-lg rounded-lg border border-gray-100">
+                    <p>
+                        <span className="font-bold text-gray-700">Your User ID:</span> {userId || 'N/A'} 
+                        (Please share this ID with your admin to set your role)
+                    </p>
+                    <p>
+                        <span className="font-bold text-gray-700">Your Role:</span> 
+                        <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-semibold ${
+                            userRole === 'manager' ? 'bg-green-100 text-green-800' :
+                            userRole === 'dataEntry' ? 'bg-blue-100 text-blue-800' :
+                            'bg-red-100 text-red-800'
+                        }`}>
+                            {userRole.toUpperCase()}
+                        </span>
+                    </p>
+                </div>
+                
+                {message && (
+                    <div className={`p-3 rounded-lg text-sm font-medium mb-6 ${
+                        message.startsWith('✅') ? 'bg-green-100 text-green-800' : 
+                        message.startsWith('🚫') || message.startsWith('❌') ? 'bg-red-100 text-red-800' : 
+                        'bg-yellow-100 text-yellow-800'
+                    }`}>
+                        {message}
+                    </div>
+                )}
+
+
+                {/* Stock Addition Form (Only visible to authorized roles) */}
+                <div className="mb-8 p-6 bg-white shadow-xl rounded-xl">
+                    <h2 className="text-2xl font-bold mb-4 text-gray-800">
+                        {hasPermission ? 'Add New Inventory Stock' : 'Stock Addition Restricted'}
+                    </h2>
+                    
+                    {hasPermission ? (
+                        <form onSubmit={handleAddStock} className="space-y-4">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <input
+                                    type="text"
+                                    placeholder="Item Name (e.g., Widget-A)"
+                                    value={newItemName}
+                                    onChange={(e) => setNewItemName(e.target.value)}
+                                    className="p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 col-span-1 md:col-span-2"
+                                    required
+                                />
+                                <input
+                                    type="number"
+                                    placeholder="Quantity"
+                                    value={newQuantity || ''}
+                                    onChange={(e) => setNewQuantity(e.target.value)}
+                                    className="p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                                    min="1"
+                                    required
+                                />
+                            </div>
+                            <button
+                                type="submit"
+                                disabled={loading}
+                                className="w-full bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition duration-150 disabled:bg-indigo-400 disabled:cursor-not-allowed shadow-md hover:shadow-lg"
+                            >
+                                {loading ? 'Processing...' : 'Add Stock to Inventory'}
+                            </button>
+                        </form>
+                    ) : (
+                        <p className="text-lg text-red-600 bg-red-50 p-4 rounded-lg border border-red-200">
+                            You must be a **Manager** or **Data Entry** person to add stock. Your current role (**{userRole.toUpperCase()}**) is not authorized.
+                        </p>
+                    )}
+                </div>
+
+                {/* Current Stock List */}
+                <div className="p-6 bg-white shadow-xl rounded-xl">
+                    <h2 className="text-2xl font-bold mb-4 text-gray-800">Current Inventory Stock</h2>
+                    <ul className="space-y-3">
+                        {stockItems.length === 0 ? (
+                            <li className="text-gray-500 italic">No stock items found.</li>
+                        ) : (
+                            stockItems.map((item) => (
+                                <li key={item.id} className="p-4 border border-gray-200 rounded-lg shadow-sm flex justify-between items-center bg-gray-50">
+                                    <div className="flex-grow">
+                                        <div className="text-lg font-semibold text-gray-900">{item.name}</div>
+                                        <div className="text-sm text-gray-500">
+                                            Added by: {item.role} ({item.addedBy.substring(0, 8)}...)
+                                        </div>
+                                    </div>
+                                    <div className="text-2xl font-extrabold text-indigo-600">
+                                        {item.quantity}
+                                    </div>
+                                </li>
+                            ))
+                        )}
+                    </ul>
+                </div>
+
+                {/* Role Setup Instructions (For testing) */}
+                <div className="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
+                    <h3 className="font-bold text-base mb-2">Testing Note: How to Authorize a User</h3>
+                    <p>To test the authorization, you must manually set the user's role in the Firestore database:</p>
+                    <ol className="list-decimal list-inside ml-2 mt-1 space-y-1">
+                        <li>Navigate to the collection path: <code className="bg-yellow-100 px-1 rounded">artifacts/{appId}/public/data/user_roles</code></li>
+                        <li>Create a new document with the ID: **Your User ID** shown above.</li>
+                        <li>Set the field <code className="bg-yellow-100 px-1 rounded">role</code> to either <code className="bg-yellow-100 px-1 rounded">manager</code> or <code className="bg-yellow-100 px-1 rounded">dataEntry</code>.</li>
+                        <li>Save the document and refresh the app. Your permissions will update automatically.</li>
+                    </ol>
+                </div>
+
+            </div>
+        </div>
+    );
+};
+
+export default App;
